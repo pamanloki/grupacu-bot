@@ -204,7 +204,8 @@ async function onGroupCommand(env, chat, from, text, msg) {
 
   if (cmd === "/start" || cmd === "/help") return sendMessage(env, chatId, helpText());
   if (cmd === "/leaderboard" || cmd === "/lb" || cmd === "/rank") return sendLeaderboard(env, chatId, "all");
-  if (cmd === "/task" || cmd === "/tugas") return sendTask(env, chatId, arg);
+  if (cmd === "/task" || cmd === "/tugas") return sendTask(env, chatId, arg, msg);
+  if (cmd === "/tasks" || cmd === "/posts") return sendTasksList(env, chatId);
   if (cmd === "/me" || cmd === "/statku") return sendMe(env, chatId, from);
   if (cmd === "/ref") return sendRef(env, chatId, from, chat);
 
@@ -237,6 +238,7 @@ async function onPrivate(env, chatId, from, text, msg) {
   if (cmd === "/mywallet") return showMyWallet(env, chatId, from);
   if (cmd === "/me") return sendMe(env, chatId, from);
   if (cmd === "/leaderboard" || cmd === "/lb") return sendLeaderboard(env, chatId, "all");
+  if (cmd === "/task" || cmd === "/tasks" || cmd === "/posts") return sendTasksList(env, chatId);
 
   // Admin export via DM juga boleh.
   if (isAdmin(env, from.id)) {
@@ -284,27 +286,90 @@ function lbButtons(scope) {
   ], [{ text: "🔄 Refresh", callback_data: `lb:${scope}` }]]);
 }
 
-// Siapa saja yang done di sebuah post.
-async function sendTask(env, chatId, arg) {
-  let taskId = arg && /^\d+$/.test(arg) ? arg : await env.GRUPACU.get("lasttask");
-  if (!taskId) return sendMessage(env, chatId, "Belum ada post yang terpantau. Post dulu di channel-nya ya.");
+// /task — kalau di-reply ke post / dikirim di thread post: detail post itu.
+// Kalau tidak: tampilkan daftar post terbaru untuk dipilih.
+async function sendTask(env, chatId, arg, msg) {
+  const tid = taskIdOf(msg) || (arg && /^\d+$/.test(arg) ? arg : null);
+  if (tid) return sendTaskDetail(env, chatId, tid);
+  return sendTasksList(env, chatId);
+}
+
+// Daftar post terbaru (buat dipilih lewat tombol).
+async function sendTasksList(env, chatId) {
+  const tasks = [];
+  let cursor;
+  do {
+    const res = await env.GRUPACU.list({ prefix: "task:", cursor, limit: 1000 });
+    for (const k of res.keys) {
+      const raw = await env.GRUPACU.get(k.name);
+      if (raw) { try { tasks.push(JSON.parse(raw)); } catch { /* skip */ } }
+    }
+    cursor = res.list_complete ? null : res.cursor;
+  } while (cursor);
+  if (!tasks.length) {
+    return sendMessage(env, chatId, "Belum ada post terpantau. Post dulu di channel (biar ke-forward ke grup).\n\nTip: reply sebuah post lalu ketik /task untuk lihat siapa yang garap post itu.");
+  }
+  tasks.sort((a, b) => b.ts - a.ts);
+  const rows = [];
+  for (const t of tasks.slice(0, 10)) {
+    const n = await countDone(env, t.id);
+    rows.push([{ text: `✅ ${n} · ${t.title.slice(0, 40)}`, callback_data: `t:${t.id}` }]);
+  }
+  return sendMessage(env, chatId, "📋 Pilih post untuk lihat siapa yang sudah/belum garap:", kb(rows));
+}
+
+async function countDone(env, taskId) {
+  let n = 0, cursor;
+  do {
+    const res = await env.GRUPACU.list({ prefix: `d:${taskId}:`, cursor, limit: 1000 });
+    n += res.keys.length;
+    cursor = res.list_complete ? null : res.cursor;
+  } while (cursor);
+  return n;
+}
+
+// Detail satu post: siapa SUDAH garap & siapa BELUM (dari roster anggota aktif).
+async function sendTaskDetail(env, chatId, taskId) {
   const task = await env.GRUPACU.get(`task:${taskId}`);
   const meta = task ? JSON.parse(task) : null;
-  const doers = [];
+
+  // Yang sudah garap.
+  const doneMap = {}; // uid -> {name, via, ts}
   let cursor;
   do {
     const res = await env.GRUPACU.list({ prefix: `d:${taskId}:`, cursor, limit: 1000 });
     for (const k of res.keys) {
+      const uid = k.name.split(":")[2];
       const raw = await env.GRUPACU.get(k.name);
-      if (raw) { try { doers.push(JSON.parse(raw)); } catch { /* skip */ } }
+      if (raw) { try { doneMap[uid] = JSON.parse(raw); } catch { doneMap[uid] = { name: "id " + uid }; } }
     }
     cursor = res.list_complete ? null : res.cursor;
   } while (cursor);
-  const lines = [`📋 Post: ${meta ? meta.title : `#${taskId}`}`, `✅ Sudah done: ${doers.length} orang`, ""];
-  doers.sort((a, b) => a.ts - b.ts);
-  doers.slice(0, 50).forEach((d, i) => lines.push(`${i + 1}. ${d.name} ${d.via === "react" ? "👍" : ""}`));
-  if (doers.length > 50) lines.push(`… dan ${doers.length - 50} lainnya`);
-  return sendMessage(env, chatId, lines.join("\n"));
+
+  // Roster anggota aktif = semua yang punya name:<uid> (pernah garap / submit wallet).
+  const roster = {};
+  cursor = undefined;
+  do {
+    const res = await env.GRUPACU.list({ prefix: "name:", cursor, limit: 1000 });
+    for (const k of res.keys) {
+      const uid = k.name.slice(5);
+      roster[uid] = (await env.GRUPACU.get(k.name)) || ("id " + uid);
+    }
+    cursor = res.list_complete ? null : res.cursor;
+  } while (cursor);
+
+  const sudah = Object.entries(doneMap).sort((a, b) => (a[1].ts || 0) - (b[1].ts || 0));
+  const belum = Object.keys(roster).filter((uid) => !doneMap[uid]);
+
+  const lines = [`📋 ${meta ? meta.title : "Post #" + taskId}`, ""];
+  lines.push(`✅ Sudah garap — ${sudah.length}`);
+  if (sudah.length) sudah.slice(0, 60).forEach(([, d], i) => lines.push(`${i + 1}. ${d.name}${d.via === "react" ? " 👍" : ""}`));
+  else lines.push("• (belum ada)");
+  lines.push("", `⬜ Belum garap — ${belum.length}`);
+  if (belum.length) belum.slice(0, 60).forEach((uid, i) => lines.push(`${i + 1}. ${roster[uid]}`));
+  else lines.push("• semua sudah! 🎉");
+  lines.push("", "ℹ️ \"Belum\" = anggota yang pernah aktif (pernah garap/kirim wallet) tapi belum di post ini.");
+  return sendMessage(env, chatId, lines.join("\n"), kb([[{ text: "📋 Post lain", callback_data: "tlist" }, { text: "🔄 Refresh", callback_data: `t:${taskId}` }]]));
 }
 
 async function sendMe(env, chatId, from) {
@@ -518,6 +583,8 @@ async function onCallback(env, cq) {
   if (!chatId) return;
   if (data === "lb:week") return sendLeaderboard(env, chatId, "week");
   if (data === "lb:all") return sendLeaderboard(env, chatId, "all");
+  if (data === "tlist") return sendTasksList(env, chatId);
+  if (data.startsWith("t:")) return sendTaskDetail(env, chatId, data.slice(2));
 }
 
 // ---------------------------------------------------------------------------
@@ -627,7 +694,9 @@ function helpText() {
     "",
     "Perintah:",
     "/leaderboard — papan peringkat (all-time & mingguan)",
-    "/task — siapa saja yang sudah done di post terbaru",
+    "/task — siapa SUDAH & BELUM garap sebuah post",
+    "   → reply post-nya lalu ketik /task (spesifik post itu)",
+    "   → atau /tasks untuk pilih dari daftar post",
     "/me — statistik kamu",
     "/ref — link referral kamu",
     "",
