@@ -90,6 +90,22 @@ async function registerTask(env, chatId, msg) {
     (msg.forward_origin && msg.forward_origin.message_id) || 0;
   await env.GRUPACU.put(`task:${taskId}`, JSON.stringify({ id: taskId, postId, title, ts: Date.now(), chatId }));
   await env.GRUPACU.put("lasttask", String(taskId));
+
+  // Pengumuman otomatis + tombol tandai selesai (kalau diaktifkan).
+  const cfg = await getConfig(env);
+  if (cfg.announce) {
+    await sendMessage(env, chatId,
+      "🎯 Airdrop baru! Kalau sudah garap, tap tombol di bawah\n(atau balas \"done\" / react 👍 di sini).\n\nBelum terdaftar? Ketik /daftar dulu.",
+      {
+        reply_parameters: { message_id: taskId },
+        reply_markup: {
+          inline_keyboard: [[
+            { text: "✅ Sudah garap", callback_data: `dn:${taskId}` },
+            { text: "👥 Lihat progress", callback_data: `t:${taskId}` },
+          ]],
+        },
+      });
+  }
 }
 
 // Task id (anchor) dari sebuah komentar di grup diskusi.
@@ -229,6 +245,12 @@ async function onGroupCommand(env, chat, from, text, msg) {
   if (cmd === "/wallets") return exportWallets(env, chatId);
   if (cmd === "/refboard") return sendRefBoard(env, chatId);
   if (cmd === "/members" || cmd === "/anggota") return sendMembers(env, chatId);
+  if (cmd === "/announce" || cmd === "/pengumuman") {
+    const cfg = await getConfig(env);
+    cfg.announce = !(arg.toLowerCase() === "off" || arg === "0");
+    await saveConfig(env, cfg);
+    return sendMessage(env, chatId, `📢 Pengumuman otomatis tiap post baru: ${cfg.announce ? "ON ✅" : "OFF"}`);
+  }
   if (cmd === "/reset") return handleReset(env, chatId, arg);
 }
 
@@ -611,6 +633,12 @@ async function handleReset(env, chatId, arg) {
 async function onCallback(env, cq) {
   const data = cq.data || "";
   const chatId = cq.message && cq.message.chat && cq.message.chat.id;
+  // Tombol "Sudah garap" -> catat done buat yang menekan.
+  if (data.startsWith("dn:")) {
+    const taskId = data.slice(3);
+    await recordDone(env, taskId, cq.from, "tombol");
+    return answerCallback(env, cq.id, "✅ Tercatat, makasih! 🚀");
+  }
   await answerCallback(env, cq.id);
   if (!chatId) return;
   if (data === "lb:week") return sendLeaderboard(env, chatId, "week");
@@ -630,6 +658,7 @@ async function getConfig(env) {
     markers: Array.isArray(c.markers) && c.markers.length ? c.markers : DEFAULT_MARKERS.slice(),
     reactEmoji: Array.isArray(c.reactEmoji) && c.reactEmoji.length ? c.reactEmoji : DEFAULT_REACT_EMOJI.slice(),
     countReactions: c.countReactions !== false,
+    announce: c.announce !== false,
     groupId: c.groupId || null,
   };
 }
@@ -691,8 +720,8 @@ async function setReaction(env, chatId, messageId, emoji) {
     await tg(env, "setMessageReaction", { chat_id: chatId, message_id: messageId, reaction: [{ type: "emoji", emoji }] });
   } catch { /* best effort */ }
 }
-async function answerCallback(env, id) {
-  try { await tg(env, "answerCallbackQuery", { callback_query_id: id }); } catch { /* abaikan */ }
+async function answerCallback(env, id, text) {
+  try { await tg(env, "answerCallbackQuery", { callback_query_id: id, ...(text ? { text } : {}) }); } catch { /* abaikan */ }
 }
 async function createInvite(env, chatId, name) {
   const res = await tg(env, "createChatInviteLink", { chat_id: chatId, name });
