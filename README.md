@@ -47,8 +47,13 @@ menandai "done" di grup diskusi, dan bot mencatat per orang.
 
 ## Perintah
 
-**Grup:** `/leaderboard` `/task` `/me` `/ref` · **Admin:** `/bind` `/setup`
-`/markers` `/wallets` `/refboard` `/reset yakin`
+**Grup:** `/daftar` `/leaderboard` `/task` `/tasks` `/me` `/ref` ·
+**Admin:** `/bind` `/setup` `/markers` `/announce on|off` `/deadline 12h`
+`/nudge` `/members` `/wallets` `/refboard` `/reset yakin`
+
+`/deadline` & `/nudge` dipakai dengan **reply ke post**-nya. Untuk reminder
+otomatis menjelang/saat deadline, pasang **Cron Trigger** `0 * * * *` di
+Settings → Triggers.
 
 **DM:** `/wallet <alamat>` `/mywallet` `/me` `/leaderboard`
 

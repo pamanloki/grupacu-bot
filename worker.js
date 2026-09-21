@@ -24,6 +24,9 @@ const DEFAULT_MARKERS = ["done", "selesai", "gm", "wagmi", "gws", "✅", "✔️
 const DEFAULT_REACT_EMOJI = ["👍", "✅", "✔️", "🔥"];
 
 export default {
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(runDeadlines(env));
+  },
   async fetch(request, env) {
     if (request.method !== "POST") {
       return new Response("grupacu-bot aktif.", { headers: { "content-type": "text/plain; charset=utf-8" } });
@@ -245,6 +248,8 @@ async function onGroupCommand(env, chat, from, text, msg) {
   if (cmd === "/wallets") return exportWallets(env, chatId);
   if (cmd === "/refboard") return sendRefBoard(env, chatId);
   if (cmd === "/members" || cmd === "/anggota") return sendMembers(env, chatId);
+  if (cmd === "/deadline" || cmd === "/dl") return setDeadline(env, chatId, taskIdOf(msg), arg);
+  if (cmd === "/nudge" || cmd === "/colek") return nudge(env, chatId, taskIdOf(msg), {});
   if (cmd === "/announce" || cmd === "/pengumuman") {
     const cfg = await getConfig(env);
     cfg.announce = !(arg.toLowerCase() === "off" || arg === "0");
@@ -372,6 +377,115 @@ async function sendTasksList(env, chatId) {
   return sendMessage(env, chatId, "📋 Pilih post untuk lihat siapa yang sudah/belum garap:", kb(rows));
 }
 
+// Set uid yang sudah garap task.
+async function doersSet(env, taskId) {
+  const s = {};
+  let cursor;
+  do {
+    const res = await env.GRUPACU.list({ prefix: `d:${taskId}:`, cursor, limit: 1000 });
+    for (const k of res.keys) s[k.name.split(":")[2]] = true;
+    cursor = res.list_complete ? null : res.cursor;
+  } while (cursor);
+  return s;
+}
+// Roster uid -> nama (anggota terdaftar / pernah aktif).
+async function rosterMap(env) {
+  const m = {};
+  let cursor;
+  do {
+    const res = await env.GRUPACU.list({ prefix: "name:", cursor, limit: 1000 });
+    for (const k of res.keys) { const uid = k.name.slice(5); m[uid] = (await env.GRUPACU.get(k.name)) || ("id " + uid); }
+    cursor = res.list_complete ? null : res.cursor;
+  } while (cursor);
+  return m;
+}
+
+// ---------------------------------------------------------------------------
+// Deadline & nudge (colek yang belum garap)
+// ---------------------------------------------------------------------------
+
+function parseDur(s) {
+  const m = (s || "").trim().toLowerCase().match(/^(\d+)\s*(m|menit|min|h|j|jam|d|hari|day)?$/);
+  if (!m) return null;
+  const n = +m[1], u = m[2] || "h";
+  if (/^(m|menit|min)$/.test(u)) return n * 60000;
+  if (/^(d|hari|day)$/.test(u)) return n * 86400000;
+  return n * 3600000;
+}
+function fmtWaktu(ts) {
+  const d = new Date(ts + WIB), p = (n) => String(n).padStart(2, "0");
+  return `${p(d.getUTCDate())}/${p(d.getUTCMonth() + 1)} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())} WIB`;
+}
+function htmlEsc(s) { return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+
+async function setDeadline(env, chatId, taskId, arg) {
+  if (!taskId) return sendMessage(env, chatId, "Reply post-nya dulu, lalu: /deadline 12h  (jam) · 2d (hari) · 30m (menit)");
+  const dur = parseDur(arg);
+  if (dur == null) return sendMessage(env, chatId, "Format: /deadline 12h · 2d · 30m");
+  const raw = await env.GRUPACU.get(`task:${taskId}`);
+  const meta = raw ? JSON.parse(raw) : { id: Number(taskId), title: "Post #" + taskId, ts: Date.now() };
+  meta.deadline = Date.now() + dur;
+  meta.remindedH3 = false;
+  meta.closed = false;
+  meta.chatId = chatId;
+  await env.GRUPACU.put(`task:${taskId}`, JSON.stringify(meta));
+  return sendMessage(env, chatId, `⏰ Deadline di-set: <b>${fmtWaktu(meta.deadline)}</b>\nBot akan colek yang belum garap menjelang & saat deadline.`, {
+    parse_mode: "HTML", reply_parameters: { message_id: Number(taskId) },
+  });
+}
+
+// Colek (mention) anggota terdaftar yang belum garap sebuah post.
+async function nudge(env, chatId, taskId, opts) {
+  opts = opts || {};
+  if (!taskId) return sendMessage(env, chatId, "Reply post-nya dulu, lalu /nudge (colek yang belum garap).");
+  const [done, roster] = await Promise.all([doersSet(env, taskId), rosterMap(env)]);
+  const belum = Object.keys(roster).filter((uid) => !done[uid]);
+  const sudah = Object.keys(done).length;
+  const raw = await env.GRUPACU.get(`task:${taskId}`);
+  const title = raw ? (JSON.parse(raw).title || "post") : "post";
+  if (!belum.length) {
+    return sendMessage(env, chatId, `🎉 Semua anggota terdaftar sudah garap: <b>${htmlEsc(title)}</b> (${sudah}✅)`, { parse_mode: "HTML", reply_parameters: { message_id: Number(taskId) } });
+  }
+  const head = opts.final
+    ? `⛔ <b>Deadline lewat</b> — ${title}\n✅ ${sudah} garap · ⬜ ${belum.length} belum:`
+    : opts.auto
+      ? `⏰ <b>Menjelang deadline</b> — ${title}\n${belum.length} belum garap, ayo:`
+      : `📣 <b>${belum.length} belum garap</b> — ${title}\nColek:`;
+  const capped = belum.slice(0, 60);
+  const mentions = capped.map((uid) => `<a href="tg://user?id=${uid}">${htmlEsc(roster[uid])}</a>`);
+  // Kirim per potongan (maks 25 mention per pesan). Potongan pertama pakai header + reply ke post.
+  for (let i = 0; i < mentions.length; i += 25) {
+    const chunk = mentions.slice(i, i + 25).join(", ");
+    const body = i === 0 ? `${head}\n${chunk}` : chunk;
+    const extra = i === 0 ? { parse_mode: "HTML", reply_parameters: { message_id: Number(taskId) } } : { parse_mode: "HTML" };
+    await sendMessage(env, chatId, body + (i + 25 >= mentions.length && belum.length > 60 ? `\n…dan ${belum.length - 60} lagi` : ""), extra);
+  }
+}
+
+// Cron: cek deadline tiap task, ingatkan H-3 jam & saat lewat.
+async function runDeadlines(env) {
+  const now = Date.now();
+  let cursor;
+  do {
+    const res = await env.GRUPACU.list({ prefix: "task:", cursor, limit: 1000 });
+    for (const k of res.keys) {
+      let meta;
+      try { meta = JSON.parse(await env.GRUPACU.get(k.name)); } catch { continue; }
+      if (!meta || !meta.deadline || meta.closed || !meta.chatId) continue;
+      if (now >= meta.deadline) {
+        await nudge(env, meta.chatId, String(meta.id), { auto: true, final: true });
+        meta.closed = true;
+        await env.GRUPACU.put(k.name, JSON.stringify(meta));
+      } else if (meta.deadline - now <= 3 * 3600000 && !meta.remindedH3) {
+        await nudge(env, meta.chatId, String(meta.id), { auto: true });
+        meta.remindedH3 = true;
+        await env.GRUPACU.put(k.name, JSON.stringify(meta));
+      }
+    }
+    cursor = res.list_complete ? null : res.cursor;
+  } while (cursor);
+}
+
 async function countDone(env, taskId) {
   let n = 0, cursor;
   do {
@@ -415,7 +529,9 @@ async function sendTaskDetail(env, chatId, taskId) {
   const sudah = Object.entries(doneMap).sort((a, b) => (a[1].ts || 0) - (b[1].ts || 0));
   const belum = Object.keys(roster).filter((uid) => !doneMap[uid]);
 
-  const lines = [`📋 ${meta ? meta.title : "Post #" + taskId}`, ""];
+  const lines = [`📋 ${meta ? meta.title : "Post #" + taskId}`];
+  if (meta && meta.deadline) lines.push(meta.closed ? `⛔ Deadline lewat (${fmtWaktu(meta.deadline)})` : `⏰ Deadline: ${fmtWaktu(meta.deadline)}`);
+  lines.push("");
   lines.push(`✅ Sudah garap — ${sudah.length}`);
   if (sudah.length) sudah.slice(0, 60).forEach(([, d], i) => lines.push(`${i + 1}. ${d.name}${d.via === "react" ? " 👍" : ""}`));
   else lines.push("• (belum ada)");
@@ -792,7 +908,9 @@ function setupText(env) {
     "2) Jadikan bot ini ADMIN di grup diskusi.",
     "3) @BotFather → /setprivacy → pilih bot → Disable (biar baca semua komen).",
     "4) Di grup diskusi ketik: /bind (set grup yang dipantau).",
-    "5) Daftarkan webhook dengan allowed_updates:",
+    "5) (Opsional, buat deadline otomatis) Settings → Triggers → Cron:",
+    "   '0 * * * *' (tiap jam) — bot ingatkan yang belum garap menjelang deadline.",
+    "6) Daftarkan webhook dengan allowed_updates:",
     "   message, edited_message, message_reaction, chat_member, callback_query",
     "",
     "Contoh setWebhook (buka di browser, ganti <...>):",
