@@ -124,7 +124,7 @@ async function maybeCountDone(env, chat, from, text, msg) {
   if (!taskId) return; // bukan komentar di bawah post
   const cfg = await getConfig(env);
   if (!isDoneText(text, cfg.markers)) return;
-  await recordDone(env, taskId, from, "teks");
+  await recordDone(env, taskId, from, "teks", chat.id);
   // Konfirmasi non-spam: kasih reaksi ✅ di komennya.
   await setReaction(env, chat.id, msg.message_id, "✅");
 }
@@ -160,7 +160,7 @@ async function onReaction(env, mr) {
   const hadDone = hasDoneEmoji(mr.old_reaction, cfg.reactEmoji);
   const hasDone = hasDoneEmoji(mr.new_reaction, cfg.reactEmoji);
   if (hasDone && !hadDone) {
-    await recordDone(env, taskId, user, "react");
+    await recordDone(env, taskId, user, "react", mr.chat && mr.chat.id);
   } else if (!hasDone && hadDone) {
     await removeDone(env, taskId, user.id, "react");
   }
@@ -175,12 +175,16 @@ function hasDoneEmoji(arr, emojis) {
 // Simpan / hitung "done"
 // ---------------------------------------------------------------------------
 
-async function recordDone(env, taskId, user, via) {
+async function recordDone(env, taskId, user, via, chatId) {
   const uid = user.id;
   const name = displayName(user);
   await env.GRUPACU.put(`d:${taskId}:${uid}`, JSON.stringify({ name, ts: Date.now(), via }));
   await env.GRUPACU.put(`w:${weekKey(Date.now())}:${uid}:${taskId}`, "1");
   await env.GRUPACU.put(`name:${uid}`, name);
+  // Pastikan task tercatat (biar punya chatId untuk link) walau bot tak lihat forward-nya.
+  if (chatId && !(await env.GRUPACU.get(`task:${taskId}`))) {
+    await env.GRUPACU.put(`task:${taskId}`, JSON.stringify({ id: Number(taskId), title: "Post #" + taskId, ts: Date.now(), chatId }));
+  }
 }
 
 // Hapus done (mis. reaksi dicabut) — hanya kalau sumbernya sama.
@@ -418,6 +422,13 @@ function fmtWaktu(ts) {
 }
 function htmlEsc(s) { return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
 
+// Link ke sebuah pesan di grup (supergrup private): t.me/c/<id>/<msgId>.
+function postLink(chatId, msgId) {
+  const s = String(chatId || "");
+  if (s.startsWith("-100")) return `https://t.me/c/${s.slice(4)}/${msgId}`;
+  return null;
+}
+
 async function setDeadline(env, chatId, taskId, arg) {
   if (!taskId) return sendMessage(env, chatId, "Reply post-nya dulu, lalu: /deadline 12h  (jam) · 2d (hari) · 30m (menit)");
   const dur = parseDur(arg);
@@ -539,7 +550,12 @@ async function sendTaskDetail(env, chatId, taskId) {
   if (belum.length) belum.slice(0, 60).forEach((uid, i) => lines.push(`${i + 1}. ${roster[uid]}`));
   else lines.push("• semua sudah! 🎉");
   lines.push("", "ℹ️ \"Belum\" = anggota terdaftar (/daftar) atau yang pernah aktif, tapi belum di post ini.");
-  return sendMessage(env, chatId, lines.join("\n"), kb([[{ text: "📋 Post lain", callback_data: "tlist" }, { text: "🔄 Refresh", callback_data: `t:${taskId}` }]]));
+  const cfg = await getConfig(env);
+  const link = postLink((meta && meta.chatId) || cfg.groupId, taskId);
+  const rows = [];
+  if (link) rows.push([{ text: "🔗 Buka post", url: link }]);
+  rows.push([{ text: "📋 Post lain", callback_data: "tlist" }, { text: "🔄 Refresh", callback_data: `t:${taskId}` }]);
+  return sendMessage(env, chatId, lines.join("\n"), kb(rows));
 }
 
 async function sendMe(env, chatId, from) {
@@ -752,7 +768,7 @@ async function onCallback(env, cq) {
   // Tombol "Sudah garap" -> catat done buat yang menekan.
   if (data.startsWith("dn:")) {
     const taskId = data.slice(3);
-    await recordDone(env, taskId, cq.from, "tombol");
+    await recordDone(env, taskId, cq.from, "tombol", chatId);
     return answerCallback(env, cq.id, "✅ Tercatat, makasih! 🚀");
   }
   await answerCallback(env, cq.id);
