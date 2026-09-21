@@ -25,7 +25,7 @@ const DEFAULT_REACT_EMOJI = ["👍", "✅", "✔️", "🔥"];
 
 export default {
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(runDeadlines(env));
+    ctx.waitUntil((async () => { await runDeadlines(env); await runAlerts(env); })());
   },
   async fetch(request, env) {
     if (request.method !== "POST") {
@@ -80,6 +80,12 @@ async function onMessage(env, msg) {
   // Grup / supergrup.
   if (chat.type === "group" || chat.type === "supergroup") {
     if (text.startsWith("/")) return onGroupCommand(env, chat, from, text, msg);
+    // Cek harga: "1 usdt" / "0.5 btc" (hanya coin yang dikenal, biar tak ganggu chat).
+    const pq = parsePriceQuery(text);
+    if (pq && pq.amount != null) {
+      const id = await knownCoin(env, pq.sym);
+      if (id) return sendConvert(env, chat.id, pq.amount, pq.sym, id);
+    }
     // Deteksi "done" di dalam thread komentar sebuah post.
     return maybeCountDone(env, chat, from, text, msg);
   }
@@ -243,6 +249,10 @@ async function onGroupCommand(env, chat, from, text, msg) {
   if (cmd === "/tasks" || cmd === "/posts") return sendTasksList(env, chatId);
   if (cmd === "/me" || cmd === "/statku") return sendMe(env, chatId, from);
   if (cmd === "/ref") return sendRef(env, chatId, from, chat);
+  if (cmd === "/p" || cmd === "/price" || cmd === "/harga") return sendPrice(env, chatId, arg || "btc");
+  if (cmd === "/alert") return addAlert(env, chatId, from, arg);
+  if (cmd === "/alerts") return listAlerts(env, chatId, from);
+  if (cmd === "/delalert" || cmd === "/hapusalert") return delAlert(env, chatId, from, arg);
 
   // Admin only
   if (!isAdmin(env, from.id)) return;
@@ -302,6 +312,16 @@ async function onPrivate(env, chatId, from, text, msg) {
   if (cmd === "/me") return sendMe(env, chatId, from);
   if (cmd === "/leaderboard" || cmd === "/lb") return sendLeaderboard(env, chatId, "all");
   if (cmd === "/task" || cmd === "/tasks" || cmd === "/posts") return sendTasksList(env, chatId);
+  if (cmd === "/p" || cmd === "/price" || cmd === "/harga") return sendPrice(env, chatId, arg || "btc");
+  if (cmd === "/alert") return addAlert(env, chatId, from, arg);
+  if (cmd === "/alerts") return listAlerts(env, chatId, from);
+  if (cmd === "/delalert" || cmd === "/hapusalert") return delAlert(env, chatId, from, arg);
+  // Auto: "1 usdt" / "0.5 btc" / plain "btc" -> harga (di DM boleh cari coin apa pun).
+  const pq = parsePriceQuery(text);
+  if (pq) {
+    const id = await resolveCoinSearch(env, pq.sym);
+    if (id) return pq.amount != null ? sendConvert(env, chatId, pq.amount, pq.sym, id) : sendPrice(env, chatId, pq.sym);
+  }
 
   // Admin export via DM juga boleh.
   if (isAdmin(env, from.id)) {
@@ -836,6 +856,178 @@ function csvCell(v) { const s = String(v == null ? "" : v); return /[",\n]/.test
 function kb(rows) { return { reply_markup: { inline_keyboard: rows } }; }
 
 // ---------------------------------------------------------------------------
+// Harga kripto (CoinGecko) + alert
+// ---------------------------------------------------------------------------
+
+const COIN_IDS = {
+  btc: "bitcoin", xbt: "bitcoin", eth: "ethereum", usdt: "tether", usdc: "usd-coin",
+  bnb: "binancecoin", sol: "solana", xrp: "ripple", ada: "cardano", doge: "dogecoin",
+  ton: "the-open-network", trx: "tron", dot: "polkadot", matic: "matic-network", pol: "matic-network",
+  avax: "avalanche-2", shib: "shiba-inu", link: "chainlink", ltc: "litecoin", bch: "bitcoin-cash",
+  near: "near", apt: "aptos", arb: "arbitrum", op: "optimism", sui: "sui", pepe: "pepe",
+  wld: "worldcoin-wld", inj: "injective-protocol", sei: "sei-network", tia: "celestia",
+  not: "notcoin", dogs: "dogs-2", hmstr: "hamster-kombat", atom: "cosmos", uni: "uniswap",
+  fil: "filecoin", etc: "ethereum-classic", xlm: "stellar", algo: "algorand", vet: "vechain",
+  render: "render-token", rndr: "render-token", ena: "ethena", ondo: "ondo-finance",
+};
+
+function parsePriceQuery(text) {
+  const t = (text || "").trim();
+  let m = t.match(/^(\d+(?:[.,]\d+)?)\s*([a-zA-Z]{2,12})$/); // "1 usdt", "0.5btc"
+  if (m) return { amount: parseFloat(m[1].replace(",", ".")), sym: m[2].toLowerCase() };
+  m = t.match(/^([a-zA-Z]{2,12})$/); // "btc"
+  if (m) return { amount: null, sym: m[1].toLowerCase() };
+  return null;
+}
+
+// Resolusi symbol -> id CoinGecko. knownCoin: hanya map/cache (buat grup, no API).
+async function knownCoin(env, sym) {
+  sym = sym.toLowerCase();
+  return COIN_IDS[sym] || (await env.GRUPACU.get(`cg:${sym}`)) || null;
+}
+// resolveCoinSearch: pakai map/cache, kalau tak ada cari via API lalu cache.
+async function resolveCoinSearch(env, sym) {
+  const known = await knownCoin(env, sym);
+  if (known) return known;
+  try {
+    const r = await fetch(`https://api.coingecko.com/api/v3/search?query=${encodeURIComponent(sym)}`, { headers: { accept: "application/json" } }).then((x) => x.json());
+    const coins = (r && r.coins) || [];
+    const hit = coins.find((c) => c.symbol && c.symbol.toLowerCase() === sym.toLowerCase()) || coins[0];
+    if (hit && hit.id) { await env.GRUPACU.put(`cg:${sym}`, hit.id, { expirationTtl: 604800 }); return hit.id; }
+  } catch { /* abaikan */ }
+  return null;
+}
+
+// Ambil harga (usd, idr, 24j) dengan cache 60 detik.
+async function cgPrice(env, ids) {
+  const out = {}, need = [];
+  for (const id of ids) {
+    const c = await env.GRUPACU.get(`px:${id}`);
+    if (c) { try { out[id] = JSON.parse(c); continue; } catch { /* refetch */ } }
+    need.push(id);
+  }
+  if (need.length) {
+    try {
+      const url = `https://api.coingecko.com/api/v3/simple/price?ids=${need.join(",")}&vs_currencies=usd,idr&include_24hr_change=true`;
+      const r = await fetch(url, { headers: { accept: "application/json" } }).then((x) => x.json());
+      for (const id of need) {
+        if (r && r[id]) { out[id] = r[id]; await env.GRUPACU.put(`px:${id}`, JSON.stringify(r[id]), { expirationTtl: 60 }); }
+      }
+    } catch { /* abaikan */ }
+  }
+  return out;
+}
+
+function thousands(s, sep) { return s.replace(/\B(?=(\d{3})+(?!\d))/g, sep); }
+function fmtIdr(n) { return thousands(String(Math.round(n)), "."); }
+function fmtUsd(n) {
+  if (n >= 1) { const [i, d] = n.toFixed(2).split("."); return thousands(i, ",") + "." + d; }
+  if (n >= 0.0001) return n.toFixed(6).replace(/0+$/, "").replace(/\.$/, "");
+  return n.toFixed(10).replace(/0+$/, "").replace(/\.$/, ""); // meme coin: 0.0000082
+}
+function changeStr(ch) {
+  if (ch == null || isNaN(ch)) return "";
+  return `${ch >= 0 ? "🟢▲" : "🔴▼"}${Math.abs(ch).toFixed(2)}%`;
+}
+function priceLine(sym, d) {
+  return `<b>${sym.toUpperCase()}</b>  $${fmtUsd(d.usd)}  ${changeStr(d.usd_24h_change)}\n   Rp ${fmtIdr(d.idr)}`;
+}
+
+async function sendPrice(env, chatId, arg) {
+  const syms = (arg || "btc").split(/\s+/).filter(Boolean).slice(0, 10);
+  const map = {};
+  for (const s of syms) { const id = await resolveCoinSearch(env, s.toLowerCase()); if (id) map[s.toLowerCase()] = id; }
+  const ids = [...new Set(Object.values(map))];
+  if (!ids.length) return sendMessage(env, chatId, "Coin nggak ketemu. Contoh: /p btc eth sol");
+  const data = await cgPrice(env, ids);
+  const seen = new Set();
+  const lines = [];
+  for (const s of syms) {
+    const sl = s.toLowerCase(), id = map[sl];
+    if (!id || !data[id] || seen.has(sl)) { if (!id) lines.push(`❓ ${sl.toUpperCase()} tak ditemukan`); continue; }
+    seen.add(sl);
+    lines.push(priceLine(sl, data[id]));
+  }
+  return sendMessage(env, chatId, lines.join("\n") || "Gagal ambil harga, coba lagi.", { parse_mode: "HTML" });
+}
+
+async function sendConvert(env, chatId, amount, sym, id) {
+  const data = await cgPrice(env, [id]);
+  const d = data[id];
+  if (!d) return sendMessage(env, chatId, "Gagal ambil harga, coba lagi.");
+  return sendMessage(env, chatId,
+    `💱 <b>${amount} ${sym.toUpperCase()}</b> ≈\n   $${fmtUsd(amount * d.usd)}\n   Rp ${fmtIdr(amount * d.idr)}\n\n1 ${sym.toUpperCase()} = $${fmtUsd(d.usd)} ${changeStr(d.usd_24h_change)}`,
+    { parse_mode: "HTML" });
+}
+
+// --- Alert harga ---
+async function addAlert(env, chatId, from, arg) {
+  const m = (arg || "").match(/^([a-zA-Z]{2,12})\s*([<>]|naik|turun|di ?atas|di ?bawah)\s*\$?([\d.,]+)$/i);
+  if (!m) return sendMessage(env, chatId, "Format: /alert btc > 70000  atau  /alert eth < 3000\n(target dalam USD)");
+  const sym = m[1].toLowerCase();
+  const opRaw = m[2].toLowerCase();
+  const op = (opRaw === ">" || opRaw === "naik" || /atas/.test(opRaw)) ? ">" : "<";
+  const target = parseFloat(m[3].replace(/,/g, ""));
+  if (!target) return sendMessage(env, chatId, "Target harga tak valid.");
+  const id = await resolveCoinSearch(env, sym);
+  if (!id) return sendMessage(env, chatId, `Coin "${sym}" tak ditemukan.`);
+  const key = `alert:${from.id}:${Date.now()}`;
+  await env.GRUPACU.put(key, JSON.stringify({ id, sym, op, target, chatId, uid: from.id, name: displayName(from) }));
+  return sendMessage(env, chatId, `🔔 Alert dipasang: <b>${sym.toUpperCase()} ${op} $${fmtUsd(target)}</b>\nAku kabari kalau kena. Lihat: /alerts`, { parse_mode: "HTML" });
+}
+async function listAlerts(env, chatId, from) {
+  const arr = [];
+  let cursor;
+  do {
+    const res = await env.GRUPACU.list({ prefix: `alert:${from.id}:`, cursor, limit: 1000 });
+    for (const k of res.keys) { const raw = await env.GRUPACU.get(k.name); if (raw) { try { arr.push({ key: k.name, ...JSON.parse(raw) }); } catch { /* skip */ } } }
+    cursor = res.list_complete ? null : res.cursor;
+  } while (cursor);
+  if (!arr.length) return sendMessage(env, chatId, "Belum ada alert. Pasang: /alert btc > 70000");
+  const lines = ["🔔 Alert kamu:", ""];
+  arr.forEach((a, i) => lines.push(`${i + 1}. ${a.sym.toUpperCase()} ${a.op} $${fmtUsd(a.target)}`));
+  lines.push("", "Hapus: /delalert <nomor> (atau /delalert all)");
+  return sendMessage(env, chatId, lines.join("\n"));
+}
+async function delAlert(env, chatId, from, arg) {
+  const keys = [];
+  let cursor;
+  do {
+    const res = await env.GRUPACU.list({ prefix: `alert:${from.id}:`, cursor, limit: 1000 });
+    for (const k of res.keys) keys.push(k.name);
+    cursor = res.list_complete ? null : res.cursor;
+  } while (cursor);
+  if (arg.toLowerCase() === "all") { for (const k of keys) await env.GRUPACU.delete(k); return sendMessage(env, chatId, "🗑️ Semua alert dihapus."); }
+  const n = parseInt(arg, 10);
+  if (!n || n < 1 || n > keys.length) return sendMessage(env, chatId, "Nomor tak valid. Lihat /alerts.");
+  await env.GRUPACU.delete(keys[n - 1]);
+  return sendMessage(env, chatId, `🗑️ Alert #${n} dihapus.`);
+}
+// Cron: cek semua alert, picu yang kena, lalu hapus (one-shot).
+async function runAlerts(env) {
+  const alerts = [];
+  let cursor;
+  do {
+    const res = await env.GRUPACU.list({ prefix: "alert:", cursor, limit: 1000 });
+    for (const k of res.keys) { const raw = await env.GRUPACU.get(k.name); if (raw) { try { alerts.push({ key: k.name, ...JSON.parse(raw) }); } catch { /* skip */ } } }
+    cursor = res.list_complete ? null : res.cursor;
+  } while (cursor);
+  if (!alerts.length) return;
+  const ids = [...new Set(alerts.map((a) => a.id))];
+  const data = await cgPrice(env, ids);
+  for (const a of alerts) {
+    const d = data[a.id];
+    if (!d) continue;
+    const hit = a.op === ">" ? d.usd >= a.target : d.usd <= a.target;
+    if (!hit) continue;
+    await sendMessage(env, a.chatId,
+      `🔔 <b>ALERT</b> <a href="tg://user?id=${a.uid}">${htmlEsc(a.name)}</a>\n${a.sym.toUpperCase()} sekarang <b>$${fmtUsd(d.usd)}</b> (target ${a.op} $${fmtUsd(a.target)})`,
+      { parse_mode: "HTML" });
+    await env.GRUPACU.delete(a.key);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Telegram API
 // ---------------------------------------------------------------------------
 
@@ -899,6 +1091,11 @@ function helpText() {
     "   → atau /tasks untuk pilih dari daftar post",
     "/me — statistik kamu",
     "/ref — link referral kamu",
+    "",
+    "💹 Harga kripto:",
+    "/p btc eth sol — harga (USD & IDR, 24 jam)",
+    "ketik \"1 usdt\" / \"0.5 btc\" — langsung muncul nilainya",
+    "/alert btc > 70000 — beri tahu saat harga kena · /alerts /delalert",
     "",
     "💼 Simpan wallet: DM bot ini → /wallet <alamat>",
   ].join("\n");
