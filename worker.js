@@ -192,6 +192,13 @@ async function nameOf(env, uid) {
   return (await env.GRUPACU.get(`name:${uid}`)) || `id ${uid}`;
 }
 
+// Daftarkan anggota ke roster resmi (biar muncul di "belum garap").
+async function registerMember(env, user) {
+  const name = displayName(user);
+  await env.GRUPACU.put(`member:${user.id}`, name);
+  await env.GRUPACU.put(`name:${user.id}`, name);
+}
+
 // ---------------------------------------------------------------------------
 // Perintah grup
 // ---------------------------------------------------------------------------
@@ -203,6 +210,11 @@ async function onGroupCommand(env, chat, from, text, msg) {
   const chatId = chat.id;
 
   if (cmd === "/start" || cmd === "/help") return sendMessage(env, chatId, helpText());
+  if (cmd === "/daftar" || cmd === "/join" || cmd === "/gas") {
+    await registerMember(env, from);
+    await setReaction(env, chatId, msg.message_id, "✅");
+    return sendMessage(env, chatId, `✅ ${displayName(from)} terdaftar! Sekarang kamu masuk daftar, jadi kelihatan di "belum garap" tiap post sampai kamu tandai done.`);
+  }
   if (cmd === "/leaderboard" || cmd === "/lb" || cmd === "/rank") return sendLeaderboard(env, chatId, "all");
   if (cmd === "/task" || cmd === "/tugas") return sendTask(env, chatId, arg, msg);
   if (cmd === "/tasks" || cmd === "/posts") return sendTasksList(env, chatId);
@@ -216,7 +228,23 @@ async function onGroupCommand(env, chat, from, text, msg) {
   if (cmd === "/markers") return handleMarkers(env, chatId, arg);
   if (cmd === "/wallets") return exportWallets(env, chatId);
   if (cmd === "/refboard") return sendRefBoard(env, chatId);
+  if (cmd === "/members" || cmd === "/anggota") return sendMembers(env, chatId);
   if (cmd === "/reset") return handleReset(env, chatId, arg);
+}
+
+// Daftar anggota terdaftar (roster).
+async function sendMembers(env, chatId) {
+  const names = [];
+  let cursor;
+  do {
+    const res = await env.GRUPACU.list({ prefix: "name:", cursor, limit: 1000 });
+    for (const k of res.keys) names.push((await env.GRUPACU.get(k.name)) || k.name.slice(5));
+    cursor = res.list_complete ? null : res.cursor;
+  } while (cursor);
+  if (!names.length) return sendMessage(env, chatId, "Belum ada anggota di roster. Suruh member ketik /daftar.");
+  names.sort((a, b) => a.localeCompare(b));
+  const head = `👥 Roster anggota — ${names.length}\n\n`;
+  return sendMessage(env, chatId, head + names.slice(0, 100).map((n, i) => `${i + 1}. ${n}`).join("\n") + (names.length > 100 ? `\n… dan ${names.length - 100} lagi` : ""));
 }
 
 // ---------------------------------------------------------------------------
@@ -234,6 +262,10 @@ async function onPrivate(env, chatId, from, text, msg) {
     return sendMessage(env, chatId, dmHelpText());
   }
   if (cmd === "/help") return sendMessage(env, chatId, dmHelpText());
+  if (cmd === "/daftar" || cmd === "/join" || cmd === "/gas") {
+    await registerMember(env, from);
+    return sendMessage(env, chatId, "✅ Terdaftar! Kamu masuk roster grup.");
+  }
   if (cmd === "/wallet" || cmd === "/setwallet") return handleWallet(env, chatId, from, arg);
   if (cmd === "/mywallet") return showMyWallet(env, chatId, from);
   if (cmd === "/me") return sendMe(env, chatId, from);
@@ -368,7 +400,7 @@ async function sendTaskDetail(env, chatId, taskId) {
   lines.push("", `⬜ Belum garap — ${belum.length}`);
   if (belum.length) belum.slice(0, 60).forEach((uid, i) => lines.push(`${i + 1}. ${roster[uid]}`));
   else lines.push("• semua sudah! 🎉");
-  lines.push("", "ℹ️ \"Belum\" = anggota yang pernah aktif (pernah garap/kirim wallet) tapi belum di post ini.");
+  lines.push("", "ℹ️ \"Belum\" = anggota terdaftar (/daftar) atau yang pernah aktif, tapi belum di post ini.");
   return sendMessage(env, chatId, lines.join("\n"), kb([[{ text: "📋 Post lain", callback_data: "tlist" }, { text: "🔄 Refresh", callback_data: `t:${taskId}` }]]));
 }
 
@@ -689,10 +721,13 @@ function helpText() {
   return [
     "🤖 GRUPACU BOT — pelacak tugas airdrop",
     "",
+    "📝 Daftar dulu sekali: ketik /daftar (biar masuk roster & kelihatan",
+    "   di \"belum garap\").",
     "Tandai selesai: balas post di grup dengan \"done\"/✅/👍,",
     "atau kasih reaksi 👍/✅ pada post-nya.",
     "",
     "Perintah:",
+    "/daftar — masuk roster anggota",
     "/leaderboard — papan peringkat (all-time & mingguan)",
     "/task — siapa SUDAH & BELUM garap sebuah post",
     "   → reply post-nya lalu ketik /task (spesifik post itu)",
