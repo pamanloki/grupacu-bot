@@ -88,7 +88,7 @@ async function onMessage(env, msg) {
 // Daftarkan post channel (dipakai sebagai "task").
 async function registerTask(env, chatId, msg) {
   const taskId = msg.message_id; // id pesan forward di grup = anchor thread komentar
-  const title = (msg.text || msg.caption || "").replace(/\s+/g, " ").trim().slice(0, 80) || "(tanpa teks)";
+  const title = (msg.text || msg.caption || "").replace(/\s+/g, " ").trim().slice(0, 100) || "(media/tanpa teks)";
   const postId = (msg.forward_from_message_id) ||
     (msg.forward_origin && msg.forward_origin.message_id) || 0;
   await env.GRUPACU.put(`task:${taskId}`, JSON.stringify({ id: taskId, postId, title, ts: Date.now(), chatId }));
@@ -373,12 +373,16 @@ async function sendTasksList(env, chatId) {
     return sendMessage(env, chatId, "Belum ada post terpantau. Post dulu di channel (biar ke-forward ke grup).\n\nTip: reply sebuah post lalu ketik /task untuk lihat siapa yang garap post itu.");
   }
   tasks.sort((a, b) => b.ts - a.ts);
+  const cfg = await getConfig(env);
   const rows = [];
   for (const t of tasks.slice(0, 10)) {
     const n = await countDone(env, t.id);
-    rows.push([{ text: `✅ ${n} · ${t.title.slice(0, 40)}`, callback_data: `t:${t.id}` }]);
+    const row = [{ text: `✅ ${n} · ${(t.title || "post").slice(0, 45)}`, callback_data: `t:${t.id}` }];
+    const link = postLink(t.chatId || cfg.groupId, t.id);
+    if (link) row.push({ text: "🔗", url: link });
+    rows.push(row);
   }
-  return sendMessage(env, chatId, "📋 Pilih post untuk lihat siapa yang sudah/belum garap:", kb(rows));
+  return sendMessage(env, chatId, "📋 Pilih post — tap judul untuk lihat siapa yang sudah/belum garap, 🔗 untuk buka post:", kb(rows));
 }
 
 // Set uid yang sudah garap task.
