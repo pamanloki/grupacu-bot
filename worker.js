@@ -1153,13 +1153,39 @@ async function loadAirdrops(env) {
   return arr;
 }
 async function listAirdrops(env, chatId) {
-  const arr = await loadAirdrops(env);
-  if (!arr.length) return sendMessage(env, chatId, "🗓️ Belum ada airdrop terdaftar.\nAdmin bisa menambah: /addairdrop Nama | https://link | catatan");
+  const cfg = await getConfig(env);
+  // Post channel (otomatis jadi airdrop) — terbaru dulu.
+  const tasks = [];
+  let cursor;
+  do {
+    const res = await env.GRUPACU.list({ prefix: "task:", cursor, limit: 1000 });
+    for (const k of res.keys) { const raw = await env.GRUPACU.get(k.name); if (raw) { try { tasks.push(JSON.parse(raw)); } catch { /* skip */ } } }
+    cursor = res.list_complete ? null : res.cursor;
+  } while (cursor);
+  tasks.sort((a, b) => b.ts - a.ts);
+  const manual = await loadAirdrops(env);
+
+  if (!tasks.length && !manual.length) {
+    return sendMessage(env, chatId, "🗓️ Belum ada airdrop.\nPost di channel (otomatis masuk), atau admin: /addairdrop Nama | link | catatan");
+  }
   const lines = ["🗓️ <b>AIRDROP AKTIF</b>", ""];
-  arr.forEach((a, i) => {
-    lines.push(`${i + 1}. <b>${htmlEsc(a.name)}</b>${a.note ? ` — <i>${htmlEsc(a.note)}</i>` : ""}`);
-    if (a.link) lines.push(`   🔗 ${htmlEsc(a.link)}`);
-  });
+  let n = 1;
+  for (const t of tasks.slice(0, 20)) {
+    const done = await countDone(env, t.id);
+    const link = postLink(t.chatId || cfg.groupId, t.id);
+    lines.push(`${n}. <b>${htmlEsc(t.title)}</b>  <i>(✅${done})</i>`);
+    if (link) lines.push(`   🔗 ${link}`);
+    n++;
+  }
+  if (manual.length) {
+    lines.push("", "➕ <i>Tambahan (di luar channel):</i>");
+    for (const a of manual) {
+      lines.push(`${n}. <b>${htmlEsc(a.name)}</b>${a.note ? ` — <i>${htmlEsc(a.note)}</i>` : ""}`);
+      if (a.link) lines.push(`   🔗 ${htmlEsc(a.link)}`);
+      n++;
+    }
+  }
+  lines.push("", "<i>Tap 🔗 buka post · garap lalu balas \"done\"</i>");
   return sendMessage(env, chatId, lines.join("\n"), { parse_mode: "HTML" });
 }
 async function addAirdrop(env, chatId, arg) {
