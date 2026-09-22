@@ -912,8 +912,8 @@ async function usdIdr(env) {
 
 const STABLE = { usdt: 1, usdc: 1, dai: 1, fdusd: 1, tusd: 1, busd: 1 };
 
-// Ambil quote sebuah coin: { usd, idr, chg }. Binance dulu (paling stabil dari
-// Worker), fallback CoinGecko. Cache 60 detik per symbol.
+// Ambil quote sebuah coin: { usd, idr, chg }. Rantai sumber biar tahan limit:
+// CryptoCompare -> Binance -> CoinGecko. Cache 60 detik per symbol.
 async function quote(env, sym, cgId) {
   sym = (sym || "").toLowerCase();
   const cached = await env.GRUPACU.get(`q:${sym}`);
@@ -921,12 +921,26 @@ async function quote(env, sym, cgId) {
   const rate = await usdIdr(env);
   let q = null;
   if (STABLE[sym] != null) q = { usd: STABLE[sym], chg: 0, idr: STABLE[sym] * rate };
+
+  // 1) CryptoCompare — pakai symbol langsung, kasih USD+IDR+change, andal dari Worker.
+  if (!q) {
+    try {
+      const U = sym.toUpperCase();
+      const r = await fetch(`https://min-api.cryptocompare.com/data/pricemultifull?fsyms=${encodeURIComponent(U)}&tsyms=USD,IDR`).then((x) => x.json());
+      const raw = r && r.RAW && r.RAW[U];
+      if (raw && raw.USD && raw.USD.PRICE) {
+        q = { usd: raw.USD.PRICE, chg: raw.USD.CHANGEPCT24HOUR, idr: (raw.IDR && raw.IDR.PRICE) || raw.USD.PRICE * rate };
+      }
+    } catch { /* lanjut */ }
+  }
+  // 2) Binance
   if (!q) {
     try {
       const r = await fetch(`https://api.binance.com/api/v3/ticker/24hr?symbol=${sym.toUpperCase()}USDT`).then((x) => x.json());
       if (r && r.lastPrice) { const usd = +r.lastPrice; q = { usd, chg: +r.priceChangePercent, idr: usd * rate }; }
-    } catch { /* lanjut fallback */ }
+    } catch { /* lanjut */ }
   }
+  // 3) CoinGecko
   if (!q && cgId) {
     try {
       const r = await fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${cgId}&vs_currencies=usd,idr&include_24hr_change=true`, { headers: { accept: "application/json" } }).then((x) => x.json());
