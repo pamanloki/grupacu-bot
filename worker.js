@@ -1041,7 +1041,7 @@ function coinCard(sym, q, amount) {
   if (q.cap) stats.push(`Cap $${fmtBig(q.cap)}`);
   if (q.vol) stats.push(`Vol $${fmtBig(q.vol)}`);
   if (stats.length) L.push("", `<i>📊 ${stats.join("  ·  ")}</i>`);
-  if (q.src && q.src !== "stable") L.push(`<i>Sumber: ${q.src}</i>`);
+  if (q.src && q.src !== "stable") L.push(`<i>source: ${q.src}</i>`);
   return L.join("\n");
 }
 
