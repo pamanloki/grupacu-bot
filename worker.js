@@ -80,17 +80,18 @@ async function onMessage(env, msg) {
   // Grup / supergrup.
   if (chat.type === "group" || chat.type === "supergroup") {
     if (text.startsWith("/")) return onGroupCommand(env, chat, from, text, msg);
+    const th = msg.message_thread_id;
     // Convert antar coin: "1 btc to eth" (hanya coin dikenal).
     const cv = parseConvertQuery(text);
     if (cv) {
       const a = await knownCoin(env, cv.from), b = await knownCoin(env, cv.to);
-      if (a && b) return sendCoinConvert(env, chat.id, cv.amount, cv.from, cv.to, a, b);
+      if (a && b) return sendCoinConvert(env, chat.id, cv.amount, cv.from, cv.to, a, b, th);
     }
     // Cek harga: "1 usdt" / "0.5 btc" (hanya coin yang dikenal, biar tak ganggu chat).
     const pq = parsePriceQuery(text);
     if (pq && pq.amount != null) {
       const id = await knownCoin(env, pq.sym);
-      if (id) return sendConvert(env, chat.id, pq.amount, pq.sym, id);
+      if (id) return sendConvert(env, chat.id, pq.amount, pq.sym, id, th);
     }
     // Deteksi "done" di dalam thread komentar sebuah post.
     return maybeCountDone(env, chat, from, text, msg);
@@ -255,11 +256,12 @@ async function onGroupCommand(env, chat, from, text, msg) {
   if (cmd === "/tasks" || cmd === "/posts") return sendTasksList(env, chatId);
   if (cmd === "/me" || cmd === "/statku") return sendMe(env, chatId, from);
   if (cmd === "/ref") return sendRef(env, chatId, from, chat);
-  if (cmd === "/p" || cmd === "/price" || cmd === "/harga") return sendPrice(env, chatId, arg || "btc");
+  const th = msg.message_thread_id;
+  if (cmd === "/p" || cmd === "/price" || cmd === "/harga") return sendPrice(env, chatId, arg || "btc", th);
   if (cmd === "/pdebug") return sendPriceDebug(env, chatId, arg || "btc");
-  if (cmd === "/gas") return sendGas(env, chatId);
-  if (cmd === "/fgi" || cmd === "/feargreed") return sendFgi(env, chatId);
-  if (cmd === "/conv" || cmd === "/convert") return doConvCmd(env, chatId, arg);
+  if (cmd === "/gas") return sendGas(env, chatId, th);
+  if (cmd === "/fgi" || cmd === "/feargreed") return sendFgi(env, chatId, th);
+  if (cmd === "/conv" || cmd === "/convert") return doConvCmd(env, chatId, arg, th);
   if (cmd === "/airdrops" || cmd === "/airdrop") return listAirdrops(env, chatId);
   if (cmd === "/alert") return addAlert(env, chatId, from, arg);
   if (cmd === "/alerts") return listAlerts(env, chatId, from);
@@ -880,6 +882,8 @@ function weekKey(ts) {
 function escapeRe(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
 function csvCell(v) { const s = String(v == null ? "" : v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; }
 function kb(rows) { return { reply_markup: { inline_keyboard: rows } }; }
+// Sisipkan message_thread_id supaya balasan nempel di thread komentar post.
+function inThread(thread, extra) { return thread ? { message_thread_id: thread, ...(extra || {}) } : (extra || {}); }
 
 // ---------------------------------------------------------------------------
 // Harga kripto (CoinGecko) + alert
@@ -1069,15 +1073,15 @@ function coinCard(sym, q, amount) {
   return L.join("\n");
 }
 
-async function sendPrice(env, chatId, arg) {
+async function sendPrice(env, chatId, arg, thread) {
   const syms = [...new Set((arg || "btc").split(/\s+/).filter(Boolean).map((s) => s.toLowerCase()))].slice(0, 10);
   const dbg = [];
   // Satu coin -> kartu lengkap; banyak coin -> daftar ringkas.
   if (syms.length === 1) {
     const sl = syms[0];
     const q = await quote(env, sl, await resolveCoinSearch(env, sl), dbg);
-    if (!q) return sendMessage(env, chatId, `❓ <b>${sl.toUpperCase()}</b> tak terbaca.\n<code>${htmlEsc(dbg.join(" · ") || "no source")}</code>`, { parse_mode: "HTML" });
-    return sendMessage(env, chatId, coinCard(sl, q, null), { parse_mode: "HTML" });
+    if (!q) return sendMessage(env, chatId, `❓ <b>${sl.toUpperCase()}</b> tak terbaca.\n<code>${htmlEsc(dbg.join(" · ") || "no source")}</code>`, inThread(thread, { parse_mode: "HTML" }));
+    return sendMessage(env, chatId, coinCard(sl, q, null), inThread(thread, { parse_mode: "HTML" }));
   }
   const lines = [];
   for (const sl of syms) {
@@ -1085,7 +1089,7 @@ async function sendPrice(env, chatId, arg) {
     lines.push(q ? priceLine(sl, q) : `❓ <b>${sl.toUpperCase()}</b> tak terbaca`);
   }
   const body = "💹 <b>Harga Kripto</b>  <i>(USD · IDR)</i>\n\n" + lines.join("\n\n");
-  return sendMessage(env, chatId, body, { parse_mode: "HTML" });
+  return sendMessage(env, chatId, body, inThread(thread, { parse_mode: "HTML" }));
 }
 
 // Diagnosa: cek tiap sumber harga, tampilkan HTTP status + cuplikan.
@@ -1106,11 +1110,11 @@ async function sendPriceDebug(env, chatId, sym) {
   return sendMessage(env, chatId, out.join("\n\n"));
 }
 
-async function sendConvert(env, chatId, amount, sym, id) {
+async function sendConvert(env, chatId, amount, sym, id, thread) {
   const dbg = [];
   const q = await quote(env, sym, id, dbg);
-  if (!q) return sendMessage(env, chatId, `Gagal ambil harga ${sym.toUpperCase()}.\n<code>${htmlEsc(dbg.join(" · ") || "no source")}</code>`, { parse_mode: "HTML" });
-  return sendMessage(env, chatId, coinCard(sym, q, amount), { parse_mode: "HTML" });
+  if (!q) return sendMessage(env, chatId, `Gagal ambil harga ${sym.toUpperCase()}.\n<code>${htmlEsc(dbg.join(" · ") || "no source")}</code>`, inThread(thread, { parse_mode: "HTML" }));
+  return sendMessage(env, chatId, coinCard(sym, q, amount), inThread(thread, { parse_mode: "HTML" }));
 }
 function fmtAmt(n) {
   if (Number.isInteger(n)) return thousands(String(n), ",");
@@ -1128,9 +1132,9 @@ function parseConvertQuery(text) {
   if (!m) return null;
   return { amount: parseFloat(m[1].replace(",", ".")), from: m[2].toLowerCase(), to: m[3].toLowerCase() };
 }
-async function sendCoinConvert(env, chatId, amount, symA, symB, idA, idB) {
+async function sendCoinConvert(env, chatId, amount, symA, symB, idA, idB, thread) {
   const [qa, qb] = await Promise.all([quote(env, symA, idA), quote(env, symB, idB)]);
-  if (!qa || !qb) return sendMessage(env, chatId, "Gagal ambil harga, coba lagi.");
+  if (!qa || !qb) return sendMessage(env, chatId, "Gagal ambil harga, coba lagi.", inThread(thread));
   const A = symA.toUpperCase(), B = symB.toUpperCase();
   const out = amount * qa.usd / qb.usd;
   return sendMessage(env, chatId, [
@@ -1140,24 +1144,24 @@ async function sendCoinConvert(env, chatId, amount, symA, symB, idA, idB) {
     "",
     `<i>≈ $${fmtUsd(amount * qa.usd)}  ·  Rp ${fmtIdr(amount * qa.idr)}</i>`,
     `<i>1 ${A}=$${fmtUsd(qa.usd)} · 1 ${B}=$${fmtUsd(qb.usd)}</i>`,
-  ].join("\n"), { parse_mode: "HTML" });
+  ].join("\n"), inThread(thread, { parse_mode: "HTML" }));
 }
 
 // /conv 1 btc eth  atau  /conv 1 btc to eth
-async function doConvCmd(env, chatId, arg) {
+async function doConvCmd(env, chatId, arg, thread) {
   let cv = parseConvertQuery(arg);
   if (!cv) {
     const m = (arg || "").trim().match(/^(\d+(?:[.,]\d+)?)\s+([a-zA-Z]{2,12})\s+([a-zA-Z]{2,12})$/);
     if (m) cv = { amount: parseFloat(m[1].replace(",", ".")), from: m[2].toLowerCase(), to: m[3].toLowerCase() };
   }
-  if (!cv) return sendMessage(env, chatId, "Format: /conv 1 btc eth  (atau ketik: 1 btc to eth)");
+  if (!cv) return sendMessage(env, chatId, "Format: /conv 1 btc eth  (atau ketik: 1 btc to eth)", inThread(thread));
   const a = await resolveCoinSearch(env, cv.from), b = await resolveCoinSearch(env, cv.to);
-  if (!a || !b) return sendMessage(env, chatId, "Coin tak ditemukan.");
-  return sendCoinConvert(env, chatId, cv.amount, cv.from, cv.to, a, b);
+  if (!a || !b) return sendMessage(env, chatId, "Coin tak ditemukan.", inThread(thread));
+  return sendCoinConvert(env, chatId, cv.amount, cv.from, cv.to, a, b, thread);
 }
 
 // Fear & Greed Index (sentimen market).
-async function sendFgi(env, chatId) {
+async function sendFgi(env, chatId, thread) {
   try {
     const r = await fetch("https://api.alternative.me/fng/").then((x) => x.json());
     const d = r && r.data && r.data[0];
@@ -1166,8 +1170,8 @@ async function sendFgi(env, chatId) {
     const emo = v < 25 ? "😱" : v < 45 ? "😨" : v < 55 ? "😐" : v < 75 ? "🙂" : "🤑";
     const f = Math.round(v / 10);
     const bar = "🟩".repeat(f) + "⬜".repeat(10 - f);
-    return sendMessage(env, chatId, `${emo} <b>Fear &amp; Greed Index</b>\n➖➖➖➖➖➖➖\n<b>${v}/100</b> — ${cls}\n${bar}\n\n<i>source: alternative.me</i>`, { parse_mode: "HTML" });
-  } catch { return sendMessage(env, chatId, "Gagal ambil index, coba lagi."); }
+    return sendMessage(env, chatId, `${emo} <b>Fear &amp; Greed Index</b>\n➖➖➖➖➖➖➖\n<b>${v}/100</b> — ${cls}\n${bar}\n\n<i>source: alternative.me</i>`, inThread(thread, { parse_mode: "HTML" }));
+  } catch { return sendMessage(env, chatId, "Gagal ambil index, coba lagi.", inThread(thread)); }
 }
 
 // ---------------------------------------------------------------------------
@@ -1201,14 +1205,14 @@ async function ethGasGwei(dbg) {
   }
   return null;
 }
-async function sendGas(env, chatId) {
+async function sendGas(env, chatId, thread) {
   let gwei = null, dbg = [];
   try {
     const cached = await env.GRUPACU.get("gasgwei");
     gwei = cached ? +cached : await ethGasGwei(dbg);
     if (gwei != null && !cached) await env.GRUPACU.put("gasgwei", String(gwei), { expirationTtl: 30 });
   } catch (e) { dbg.push("x:" + (e && e.message ? e.message.slice(0, 40) : "err")); }
-  if (gwei == null) return sendMessage(env, chatId, `⛽ Gagal ambil data gas.\n<code>${htmlEsc(dbg.join(" · ") || "no rpc")}</code>`, { parse_mode: "HTML" });
+  if (gwei == null) return sendMessage(env, chatId, `⛽ Gagal ambil data gas.\n<code>${htmlEsc(dbg.join(" · ") || "no rpc")}</code>`, inThread(thread, { parse_mode: "HTML" }));
   let ethUsd = 0;
   try { const eth = await quote(env, "eth", "ethereum"); ethUsd = eth ? eth.usd : 0; } catch { /* biarkan 0 */ }
   const cost = (gas) => ethUsd ? "$" + fmtUsd(gas * gwei * 1e-9 * ethUsd) : "-";
@@ -1221,7 +1225,7 @@ async function sendGas(env, chatId) {
     `🔴 Cepat  : <b>${fmtGwei(fast)} gwei</b>`,
     "",
     `<i>Estimasi @normal: transfer ${cost(21000)} · swap ${cost(150000)}</i>`,
-  ].join("\n"), { parse_mode: "HTML" });
+  ].join("\n"), inThread(thread, { parse_mode: "HTML" }));
 }
 
 // ---------------------------------------------------------------------------
