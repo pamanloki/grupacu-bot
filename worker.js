@@ -80,7 +80,7 @@ async function onMessage(env, msg) {
   // Grup / supergrup.
   if (chat.type === "group" || chat.type === "supergroup") {
     if (text.startsWith("/")) return onGroupCommand(env, chat, from, text, msg);
-    const th = msg.message_thread_id;
+    const th = replyCtx(msg);
     // Convert antar coin: "1 btc to eth" (hanya coin dikenal).
     const cv = parseConvertQuery(text);
     if (cv) {
@@ -256,7 +256,7 @@ async function onGroupCommand(env, chat, from, text, msg) {
   if (cmd === "/tasks" || cmd === "/posts") return sendTasksList(env, chatId);
   if (cmd === "/me" || cmd === "/statku") return sendMe(env, chatId, from);
   if (cmd === "/ref") return sendRef(env, chatId, from, chat);
-  const th = msg.message_thread_id;
+  const th = replyCtx(msg);
   if (cmd === "/p" || cmd === "/price" || cmd === "/harga") return sendPrice(env, chatId, arg || "btc", th);
   if (cmd === "/pdebug") return sendPriceDebug(env, chatId, arg || "btc");
   if (cmd === "/gas") return sendGas(env, chatId, th);
@@ -882,8 +882,21 @@ function weekKey(ts) {
 function escapeRe(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
 function csvCell(v) { const s = String(v == null ? "" : v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; }
 function kb(rows) { return { reply_markup: { inline_keyboard: rows } }; }
-// Sisipkan message_thread_id supaya balasan nempel di thread komentar post.
-function inThread(thread, extra) { return thread ? { message_thread_id: thread, ...(extra || {}) } : (extra || {}); }
+// Konteks balasan supaya nempel di thread komentar post: kita BALAS langsung
+// pesan/komentar user (reply_parameters). Membalas pesan yang ada di dalam
+// thread komentar otomatis menaruh balasan bot di thread yg sama — jauh lebih
+// andal dibanding cuma set message_thread_id. message_thread_id tetap disertakan
+// sebagai cadangan. allow_sending_without_reply biar tak error kalau pesan hilang.
+function replyCtx(msg) {
+  if (!msg) return null;
+  return { thread: msg.message_thread_id, replyTo: msg.message_id };
+}
+function inThread(ctx, extra) {
+  const out = { ...(extra || {}) };
+  if (ctx && ctx.thread) out.message_thread_id = ctx.thread;
+  if (ctx && ctx.replyTo) out.reply_parameters = { message_id: ctx.replyTo, allow_sending_without_reply: true };
+  return out;
+}
 
 // ---------------------------------------------------------------------------
 // Harga kripto (CoinGecko) + alert
