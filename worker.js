@@ -264,6 +264,8 @@ async function onGroupCommand(env, chat, from, text, msg) {
   if (cmd === "/conv" || cmd === "/convert") return doConvCmd(env, chatId, arg, th);
   if (cmd === "/airdrops" || cmd === "/airdrop") return listAirdrops(env, chatId);
   if (cmd === "/calendar" || cmd === "/kalender" || cmd === "/cal") return sendCalendar(env, chatId);
+  if (cmd === "/board" || cmd === "/papan" || cmd === "/progress") return sendBoard(env, chatId);
+  if (cmd === "/akun" || cmd === "/akunku" || cmd === "/accounts") return handleAccounts(env, chatId, arg);
   if (cmd === "/alert") return addAlert(env, chatId, from, arg);
   if (cmd === "/alerts") return listAlerts(env, chatId, from);
   if (cmd === "/delalert" || cmd === "/hapusalert") return delAlert(env, chatId, from, arg);
@@ -340,6 +342,8 @@ async function onPrivate(env, chatId, from, text, msg) {
   if (cmd === "/conv" || cmd === "/convert") return doConvCmd(env, chatId, arg);
   if (cmd === "/airdrops" || cmd === "/airdrop") return listAirdrops(env, chatId);
   if (cmd === "/calendar" || cmd === "/kalender" || cmd === "/cal") return sendCalendar(env, chatId);
+  if (cmd === "/board" || cmd === "/papan" || cmd === "/progress") return sendBoard(env, chatId);
+  if (cmd === "/akun" || cmd === "/akunku" || cmd === "/accounts") return handleAccounts(env, chatId, arg);
   if (cmd === "/alert") return addAlert(env, chatId, from, arg);
   if (cmd === "/alerts") return listAlerts(env, chatId, from);
   if (cmd === "/delalert" || cmd === "/hapusalert") return delAlert(env, chatId, from, arg);
@@ -880,6 +884,21 @@ async function onCallback(env, cq) {
   if (data === "lb:all") return sendLeaderboard(env, chatId, "all");
   if (data === "tlist") return sendTasksList(env, chatId);
   if (data.startsWith("t:")) return sendTaskDetail(env, chatId, data.slice(2));
+  if (data === "board") return sendBoard(env, chatId);
+  if (data === "acctlist") return handleAccounts(env, chatId, "");
+  if (data.startsWith("bd:")) return sendBoardAirdrop(env, chatId, data.slice(3), cq);
+  if (data.startsWith("bt:")) {
+    const i1 = data.indexOf(":"), i2 = data.lastIndexOf(":");
+    const aid = data.slice(i1 + 1, i2), idx = Number(data.slice(i2 + 1));
+    const accts = await getAccts(env);
+    const label = accts[idx];
+    if (label) {
+      const prog = await getProg(env, aid);
+      if (prog[label]) delete prog[label]; else prog[label] = Date.now();
+      await saveProg(env, aid, prog);
+    }
+    return sendBoardAirdrop(env, chatId, aid, cq);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1447,6 +1466,88 @@ async function delAirdrop(env, chatId, arg) {
   return sendMessage(env, chatId, `🗑️ Tanda airdrop dilepas: ${htmlEsc(it.t.title)}`, { parse_mode: "HTML" });
 }
 
+// ---------------------------------------------------------------------------
+// Papan progres airdrop × akun (buat farming multi-akun pribadi)
+// ---------------------------------------------------------------------------
+// Model: `accts` -> ["Akun 1", ...] ; `ap:<aid>` -> { "<label akun>": ts } (yang sudah garap).
+// aid = "t<taskId>" (post channel ditandai) atau "m<ts>" (airdrop manual) — tanpa ':' biar aman di callback.
+
+async function getAccts(env) {
+  const raw = await env.GRUPACU.get("accts");
+  try { const a = raw ? JSON.parse(raw) : []; return Array.isArray(a) ? a : []; } catch { return []; }
+}
+async function saveAccts(env, arr) { await env.GRUPACU.put("accts", JSON.stringify(arr)); }
+async function getProg(env, aid) {
+  const raw = await env.GRUPACU.get(`ap:${aid}`);
+  try { return raw ? JSON.parse(raw) : {}; } catch { return {}; }
+}
+async function saveProg(env, aid, obj) { await env.GRUPACU.put(`ap:${aid}`, JSON.stringify(obj)); }
+function aidOf(it) { return it.type === "task" ? "t" + it.t.id : "m" + it.a.ts; }
+function aidLabel(it) { return it.type === "task" ? it.t.title : it.a.name; }
+
+// /akun — kelola daftar akun/wallet kamu.
+async function handleAccounts(env, chatId, arg) {
+  const parts = (arg || "").split(/\s+/).filter(Boolean);
+  const sub = (parts.shift() || "").toLowerCase();
+  const accts = await getAccts(env);
+  if (sub === "add" || sub === "tambah") {
+    const label = parts.join(" ").trim().slice(0, 24);
+    if (!label) return sendMessage(env, chatId, "Cara: /akun add <nama>  (mis. /akun add Akun2)");
+    if (accts.includes(label)) return sendMessage(env, chatId, `"${label}" sudah ada.`);
+    accts.push(label); await saveAccts(env, accts);
+    return sendMessage(env, chatId, `✅ Akun ditambah: <b>${htmlEsc(label)}</b> (total ${accts.length})\nPantau: /board`, { parse_mode: "HTML" });
+  }
+  if (sub === "del" || sub === "hapus") {
+    const n = parseInt(parts[0], 10);
+    if (!n || n < 1 || n > accts.length) return sendMessage(env, chatId, "Nomor tak valid. Lihat /akun.");
+    const removed = accts.splice(n - 1, 1)[0]; await saveAccts(env, accts);
+    return sendMessage(env, chatId, `🗑️ Dihapus: ${htmlEsc(removed)}`, { parse_mode: "HTML" });
+  }
+  if (!accts.length) {
+    return sendMessage(env, chatId, "👛 Belum ada akun.\nTambah dulu: <code>/akun add Akun1</code>\nLalu pantau progres tiap airdrop di /board.", { parse_mode: "HTML" });
+  }
+  const lines = ["👛 <b>AKUN / WALLET KAMU</b>", ""];
+  accts.forEach((a, i) => lines.push(`${i + 1}. ${htmlEsc(a)}`));
+  lines.push("", "➕ <code>/akun add &lt;nama&gt;</code> · 🗑️ <code>/akun del &lt;no&gt;</code> · 📊 /board");
+  return sendMessage(env, chatId, lines.join("\n"), { parse_mode: "HTML" });
+}
+
+// /board — daftar airdrop aktif + berapa akun yang sudah garap; tap buat centang.
+async function sendBoard(env, chatId) {
+  const accts = await getAccts(env);
+  if (!accts.length) return sendMessage(env, chatId, "Tambah akunmu dulu: <code>/akun add Akun1</code>", { parse_mode: "HTML" });
+  const items = (await airdropItems(env)).filter((it) => !(it.type === "task" && it.t.closed));
+  if (!items.length) return sendMessage(env, chatId, "Belum ada airdrop aktif. Tandai lewat /addairdrop.");
+  const rows = [];
+  for (const it of items) {
+    const aid = aidOf(it);
+    const prog = await getProg(env, aid);
+    const done = accts.filter((a) => prog[a]).length;
+    const mark = done === accts.length ? "✅" : done ? "🔸" : "▫️";
+    rows.push([{ text: `${mark} ${aidLabel(it)} (${done}/${accts.length})`, callback_data: `bd:${aid}` }]);
+  }
+  rows.push([{ text: "👛 Kelola akun", callback_data: "acctlist" }]);
+  return sendMessage(env, chatId, `📊 <b>PAPAN PROGRES AIRDROP</b>\n${accts.length} akun · tap airdrop buat centang per akun:`, { parse_mode: "HTML", reply_markup: { inline_keyboard: rows } });
+}
+
+// Detail 1 airdrop: tombol toggle per akun (edit di tempat kalau dari callback).
+async function sendBoardAirdrop(env, chatId, aid, cq) {
+  const accts = await getAccts(env);
+  const items = await airdropItems(env);
+  const it = items.find((x) => aidOf(x) === aid);
+  const label = it ? aidLabel(it) : aid;
+  const prog = await getProg(env, aid);
+  const rows = accts.map((a, i) => [{ text: `${prog[a] ? "✅" : "⬜"} ${a}`, callback_data: `bt:${aid}:${i}` }]);
+  rows.push([{ text: "🔙 Semua airdrop", callback_data: "board" }]);
+  const done = accts.filter((a) => prog[a]).length;
+  const body = `📊 <b>${htmlEsc(label)}</b>\n${done}/${accts.length} akun sudah garap.\nTap buat ganti status:`;
+  const markup = { inline_keyboard: rows };
+  if (cq && cq.message) {
+    return tg(env, "editMessageText", { chat_id: chatId, message_id: cq.message.message_id, text: body, parse_mode: "HTML", reply_markup: markup });
+  }
+  return sendMessage(env, chatId, body, { parse_mode: "HTML", reply_markup: markup });
+}
+
 // --- Alert harga ---
 async function addAlert(env, chatId, from, arg) {
   const m = (arg || "").match(/^([a-zA-Z]{2,12})\s*([<>]|naik|turun|di ?atas|di ?bawah)\s*\$?([\d.,]+)$/i);
@@ -1587,6 +1688,8 @@ function helpText() {
     "/gas — biaya gas Ethereum · /fgi — Fear & Greed Index",
     "/airdrops — daftar airdrop aktif (+ countdown deadline)",
     "/calendar — airdrop diurut dari deadline terdekat + progress garap",
+    "/board — papan progres airdrop × akun (centang per akun)",
+    "/akun — kelola daftar akun/wallet kamu (add/del)",
     "",
     "💼 Simpan wallet: DM bot ini → /wallet <alamat>",
   ].join("\n");

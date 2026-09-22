@@ -48,7 +48,12 @@ menandai "done" di grup diskusi, dan bot mencatat per orang.
 ## Perintah
 
 **Grup:** `/daftar` `/leaderboard` `/task` `/tasks` `/me` `/ref` `/airdrops`
-`/calendar` ·
+`/calendar` `/board` `/akun` ·
+
+**Papan progres multi-akun** (buat farming pribadi): `/akun add <nama>` daftarkan
+akun/wallet-mu, lalu `/board` — tiap airdrop bisa dicentang **per akun** (mis.
+*Airdrop X → Akun A ✅, Akun B ⬜*). Data di KV: `accts`, `ap:<aid>`.
+
 **Admin:** `/bind` `/setup` `/markers` `/announce on|off` `/digest on|off`
 `/addairdrop` `/deadline 12h` `/nudge` `/members` `/wallets` `/refboard`
 `/reset yakin`
