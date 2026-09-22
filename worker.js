@@ -80,6 +80,12 @@ async function onMessage(env, msg) {
   // Grup / supergrup.
   if (chat.type === "group" || chat.type === "supergroup") {
     if (text.startsWith("/")) return onGroupCommand(env, chat, from, text, msg);
+    // Convert antar coin: "1 btc to eth" (hanya coin dikenal).
+    const cv = parseConvertQuery(text);
+    if (cv) {
+      const a = await knownCoin(env, cv.from), b = await knownCoin(env, cv.to);
+      if (a && b) return sendCoinConvert(env, chat.id, cv.amount, cv.from, cv.to, a, b);
+    }
     // Cek harga: "1 usdt" / "0.5 btc" (hanya coin yang dikenal, biar tak ganggu chat).
     const pq = parsePriceQuery(text);
     if (pq && pq.amount != null) {
@@ -252,6 +258,8 @@ async function onGroupCommand(env, chat, from, text, msg) {
   if (cmd === "/p" || cmd === "/price" || cmd === "/harga") return sendPrice(env, chatId, arg || "btc");
   if (cmd === "/pdebug") return sendPriceDebug(env, chatId, arg || "btc");
   if (cmd === "/gas") return sendGas(env, chatId);
+  if (cmd === "/fgi" || cmd === "/feargreed") return sendFgi(env, chatId);
+  if (cmd === "/conv" || cmd === "/convert") return doConvCmd(env, chatId, arg);
   if (cmd === "/airdrops" || cmd === "/airdrop") return listAirdrops(env, chatId);
   if (cmd === "/alert") return addAlert(env, chatId, from, arg);
   if (cmd === "/alerts") return listAlerts(env, chatId, from);
@@ -319,10 +327,18 @@ async function onPrivate(env, chatId, from, text, msg) {
   if (cmd === "/task" || cmd === "/tasks" || cmd === "/posts") return sendTasksList(env, chatId);
   if (cmd === "/p" || cmd === "/price" || cmd === "/harga") return sendPrice(env, chatId, arg || "btc");
   if (cmd === "/gas") return sendGas(env, chatId);
+  if (cmd === "/fgi" || cmd === "/feargreed") return sendFgi(env, chatId);
+  if (cmd === "/conv" || cmd === "/convert") return doConvCmd(env, chatId, arg);
   if (cmd === "/airdrops" || cmd === "/airdrop") return listAirdrops(env, chatId);
   if (cmd === "/alert") return addAlert(env, chatId, from, arg);
   if (cmd === "/alerts") return listAlerts(env, chatId, from);
   if (cmd === "/delalert" || cmd === "/hapusalert") return delAlert(env, chatId, from, arg);
+  // Auto convert "1 btc to eth" (DM: cari coin apa pun).
+  const cv = parseConvertQuery(text);
+  if (cv) {
+    const a = await resolveCoinSearch(env, cv.from), b = await resolveCoinSearch(env, cv.to);
+    if (a && b) return sendCoinConvert(env, chatId, cv.amount, cv.from, cv.to, a, b);
+  }
   // Auto: "1 usdt" / "0.5 btc" / plain "btc" -> harga (di DM boleh cari coin apa pun).
   const pq = parsePriceQuery(text);
   if (pq) {
@@ -1100,6 +1116,59 @@ function fmtAmt(n) {
   if (Number.isInteger(n)) return thousands(String(n), ",");
   return String(n);
 }
+function fmtCoin(n) {
+  if (n >= 1000) return thousands(String(Math.round(n)), ",");
+  if (n >= 1) return String(+n.toFixed(4));
+  return String(+n.toFixed(8));
+}
+
+// Convert antar coin: "1 btc to eth".
+function parseConvertQuery(text) {
+  const m = (text || "").trim().match(/^(\d+(?:[.,]\d+)?)\s*([a-zA-Z]{2,12})\s+(?:to|ke|->|=>?|jadi)\s+([a-zA-Z]{2,12})$/i);
+  if (!m) return null;
+  return { amount: parseFloat(m[1].replace(",", ".")), from: m[2].toLowerCase(), to: m[3].toLowerCase() };
+}
+async function sendCoinConvert(env, chatId, amount, symA, symB, idA, idB) {
+  const [qa, qb] = await Promise.all([quote(env, symA, idA), quote(env, symB, idB)]);
+  if (!qa || !qb) return sendMessage(env, chatId, "Gagal ambil harga, coba lagi.");
+  const A = symA.toUpperCase(), B = symB.toUpperCase();
+  const out = amount * qa.usd / qb.usd;
+  return sendMessage(env, chatId, [
+    `🔄 <b>${fmtAmt(amount)} ${A} → ${B}</b>`,
+    "➖➖➖➖➖➖➖",
+    `${coinEmoji(symB)} <b>${fmtCoin(out)} ${B}</b>`,
+    "",
+    `<i>≈ $${fmtUsd(amount * qa.usd)}  ·  Rp ${fmtIdr(amount * qa.idr)}</i>`,
+    `<i>1 ${A}=$${fmtUsd(qa.usd)} · 1 ${B}=$${fmtUsd(qb.usd)}</i>`,
+  ].join("\n"), { parse_mode: "HTML" });
+}
+
+// /conv 1 btc eth  atau  /conv 1 btc to eth
+async function doConvCmd(env, chatId, arg) {
+  let cv = parseConvertQuery(arg);
+  if (!cv) {
+    const m = (arg || "").trim().match(/^(\d+(?:[.,]\d+)?)\s+([a-zA-Z]{2,12})\s+([a-zA-Z]{2,12})$/);
+    if (m) cv = { amount: parseFloat(m[1].replace(",", ".")), from: m[2].toLowerCase(), to: m[3].toLowerCase() };
+  }
+  if (!cv) return sendMessage(env, chatId, "Format: /conv 1 btc eth  (atau ketik: 1 btc to eth)");
+  const a = await resolveCoinSearch(env, cv.from), b = await resolveCoinSearch(env, cv.to);
+  if (!a || !b) return sendMessage(env, chatId, "Coin tak ditemukan.");
+  return sendCoinConvert(env, chatId, cv.amount, cv.from, cv.to, a, b);
+}
+
+// Fear & Greed Index (sentimen market).
+async function sendFgi(env, chatId) {
+  try {
+    const r = await fetch("https://api.alternative.me/fng/").then((x) => x.json());
+    const d = r && r.data && r.data[0];
+    if (!d) throw new Error("no data");
+    const v = +d.value, cls = d.value_classification;
+    const emo = v < 25 ? "😱" : v < 45 ? "😨" : v < 55 ? "😐" : v < 75 ? "🙂" : "🤑";
+    const f = Math.round(v / 10);
+    const bar = "🟩".repeat(f) + "⬜".repeat(10 - f);
+    return sendMessage(env, chatId, `${emo} <b>Fear &amp; Greed Index</b>\n➖➖➖➖➖➖➖\n<b>${v}/100</b> — ${cls}\n${bar}\n\n<i>source: alternative.me</i>`, { parse_mode: "HTML" });
+  } catch { return sendMessage(env, chatId, "Gagal ambil index, coba lagi."); }
+}
 
 // ---------------------------------------------------------------------------
 // Gas Ethereum (⛽)
@@ -1152,6 +1221,22 @@ async function loadAirdrops(env) {
   arr.sort((a, b) => b.ts - a.ts); // terbaru dulu
   return arr;
 }
+// "3d bridge dulu" / "3 hari" / "12 jam" -> { deadline, note }.
+function parseAirdropArg(arg) {
+  const m = (arg || "").trim().match(/^(\d+)\s*(hari|hr|day|d|jam|j|h)?\b\s*(.*)$/i);
+  if (!m) return { note: (arg || "").trim() };
+  const n = +m[1], u = (m[2] || "").toLowerCase();
+  const ms = /^(jam|j|h)$/.test(u) ? n * 3600000 : n * 86400000; // default hari
+  return { deadline: Date.now() + ms, note: (m[3] || "").trim() };
+}
+function countdown(deadline) {
+  if (!deadline) return "";
+  const ms = deadline - Date.now();
+  if (ms < 0) return "⛔ lewat";
+  if (ms < 86400000) return `⏳ ${Math.max(1, Math.round(ms / 3600000))} jam lagi`;
+  return `⏳ ${Math.round(ms / 86400000)} hari lagi`;
+}
+
 // Gabungan item airdrop: post channel yang DITANDAI (task.airdrop) + manual.
 async function airdropItems(env) {
   const tasks = [];
@@ -1178,7 +1263,8 @@ async function listAirdrops(env, chatId) {
       const t = it.t;
       const done = await countDone(env, t.id);
       const link = postLink(t.chatId || cfg.groupId, t.id);
-      lines.push(`${n}. <b>${htmlEsc(t.title)}</b>  <i>(✅${done})</i>`);
+      const cd = t.deadline ? `  ${countdown(t.deadline)}` : "";
+      lines.push(`${n}. <b>${htmlEsc(t.title)}</b>  <i>(✅${done})</i>${cd}`);
       if (link) lines.push(`   🔗 ${link}`);
     } else {
       const a = it.a;
@@ -1198,13 +1284,16 @@ async function addAirdrop(env, chatId, arg, msg) {
     const t = raw ? JSON.parse(raw) : { id: Number(tid), title: "Post #" + tid, ts: Date.now(), chatId };
     t.airdrop = true;
     t.airdropTs = Date.now();
-    if (arg) t.note = arg;
+    const p = parseAirdropArg(arg);
+    if (p.deadline) { t.deadline = p.deadline; t.remindedH3 = false; t.closed = false; }
+    if (p.note) t.note = p.note;
     await env.GRUPACU.put(`task:${tid}`, JSON.stringify(t));
-    return sendMessage(env, chatId, `✅ Ditandai sebagai airdrop aktif: <b>${htmlEsc(t.title)}</b>\nLihat: /airdrops`, { parse_mode: "HTML" });
+    const dl = t.deadline ? `\n⏳ Deadline: ${fmtWaktu(t.deadline)} (${countdown(t.deadline)})` : "";
+    return sendMessage(env, chatId, `✅ Ditandai airdrop aktif: <b>${htmlEsc(t.title)}</b>${dl}\nLihat: /airdrops`, { parse_mode: "HTML" });
   }
   const parts = (arg || "").split("|").map((s) => s.trim());
   const name = parts[0];
-  if (!name) return sendMessage(env, chatId, "Cara pakai:\n• Balas post channel dengan /addairdrop → tandai post itu\n• /addairdrop Nama | link | catatan → airdrop di luar channel");
+  if (!name) return sendMessage(env, chatId, "Cara pakai:\n• Balas post channel: /addairdrop (opsional: /addairdrop 3d catatan)\n• /addairdrop Nama | link | catatan → airdrop di luar channel");
   await env.GRUPACU.put(`air:${Date.now()}`, JSON.stringify({ name, link: parts[1] || "", note: parts[2] || "", ts: Date.now() }));
   return sendMessage(env, chatId, `✅ Airdrop ditambah: <b>${htmlEsc(name)}</b>\nLihat: /airdrops`, { parse_mode: "HTML" });
 }
@@ -1362,8 +1451,9 @@ function helpText() {
     "/p btc eth sol — harga (USD & IDR, 24 jam)",
     "ketik \"1 usdt\" / \"0.5 btc\" — langsung muncul nilainya",
     "/alert btc > 70000 — beri tahu saat harga kena · /alerts /delalert",
-    "/gas — biaya gas Ethereum sekarang",
-    "/airdrops — daftar airdrop aktif",
+    "ketik \"1 btc to eth\" — konversi antar coin (/conv 1 btc eth)",
+    "/gas — biaya gas Ethereum · /fgi — Fear & Greed Index",
+    "/airdrops — daftar airdrop aktif (+ countdown deadline)",
     "",
     "💼 Simpan wallet: DM bot ini → /wallet <alamat>",
   ].join("\n");
