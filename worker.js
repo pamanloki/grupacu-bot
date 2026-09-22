@@ -245,7 +245,7 @@ async function onGroupCommand(env, chat, from, text, msg) {
   const chatId = chat.id;
 
   if (cmd === "/start" || cmd === "/help") return sendMessage(env, chatId, helpText());
-  if (cmd === "/daftar" || cmd === "/join" || cmd === "/gas") {
+  if (cmd === "/daftar" || cmd === "/join" || cmd === "/gass") {
     await registerMember(env, from);
     await setReaction(env, chatId, msg.message_id, "✅");
     return sendMessage(env, chatId, `✅ ${displayName(from)} terdaftar! Sekarang kamu masuk daftar, jadi kelihatan di "belum garap" tiap post sampai kamu tandai done.`);
@@ -316,7 +316,7 @@ async function onPrivate(env, chatId, from, text, msg) {
     return sendMessage(env, chatId, dmHelpText());
   }
   if (cmd === "/help") return sendMessage(env, chatId, dmHelpText());
-  if (cmd === "/daftar" || cmd === "/join" || cmd === "/gas") {
+  if (cmd === "/daftar" || cmd === "/join" || cmd === "/gass") {
     await registerMember(env, from);
     return sendMessage(env, chatId, "✅ Terdaftar! Kamu masuk roster grup.");
   }
