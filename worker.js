@@ -921,7 +921,7 @@ async function srcCC(U, rate, dbg) {
     if (!res.ok) { dbg && dbg.push(`CC:${res.status}`); return null; }
     const r = await res.json();
     const raw = r && r.RAW && r.RAW[U];
-    if (raw && raw.USD && raw.USD.PRICE) return { usd: raw.USD.PRICE, chg: raw.USD.CHANGEPCT24HOUR, idr: (raw.IDR && raw.IDR.PRICE) || raw.USD.PRICE * rate };
+    if (raw && raw.USD && raw.USD.PRICE) return { usd: raw.USD.PRICE, chg: raw.USD.CHANGEPCT24HOUR, idr: (raw.IDR && raw.IDR.PRICE) || raw.USD.PRICE * rate, cap: raw.USD.MKTCAP, vol: raw.USD.TOTALVOLUME24HTO, src: "CryptoCompare" };
     dbg && dbg.push("CC:nodata"); return null;
   } catch (e) { dbg && dbg.push("CC:err"); return null; }
 }
@@ -931,7 +931,7 @@ async function srcIndodax(sym, rate, dbg) {
     if (!res.ok) { dbg && dbg.push(`IDX:${res.status}`); return null; }
     const r = await res.json();
     const last = r && r.ticker && +r.ticker.last;
-    if (last) return { usd: last / rate, chg: null, idr: last };
+    if (last) return { usd: last / rate, chg: null, idr: last, src: "Indodax" };
     dbg && dbg.push("IDX:nodata"); return null;
   } catch (e) { dbg && dbg.push("IDX:err"); return null; }
 }
@@ -940,7 +940,7 @@ async function srcBinance(U, rate, dbg) {
     const res = await fetch(`https://api.binance.com/api/v3/ticker/24hr?symbol=${U}USDT`);
     if (!res.ok) { dbg && dbg.push(`BN:${res.status}`); return null; }
     const r = await res.json();
-    if (r && r.lastPrice) { const usd = +r.lastPrice; return { usd, chg: +r.priceChangePercent, idr: usd * rate }; }
+    if (r && r.lastPrice) { const usd = +r.lastPrice; return { usd, chg: +r.priceChangePercent, idr: usd * rate, src: "Binance" }; }
     dbg && dbg.push("BN:nodata"); return null;
   } catch (e) { dbg && dbg.push("BN:err"); return null; }
 }
@@ -950,19 +950,36 @@ async function srcCG(cgId, rate, dbg) {
     if (!res.ok) { dbg && dbg.push(`CG:${res.status}`); return null; }
     const r = await res.json();
     const d = r && r[cgId];
-    if (d && d.usd != null) return { usd: d.usd, chg: d.usd_24h_change, idr: d.idr != null ? d.idr : d.usd * rate };
+    if (d && d.usd != null) return { usd: d.usd, chg: d.usd_24h_change, idr: d.idr != null ? d.idr : d.usd * rate, src: "CoinGecko" };
     dbg && dbg.push("CG:nodata"); return null;
   } catch (e) { dbg && dbg.push("CG:err"); return null; }
 }
+// CoinGecko dengan API key (demo) — andal + data lengkap: rank, cap, volume.
+async function srcCGKey(env, cgId, rate, dbg) {
+  if (!env.COINGECKO_KEY || !cgId) return null;
+  try {
+    const res = await fetch(`https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&ids=${cgId}&price_change_percentage=24h`, {
+      headers: { accept: "application/json", "x-cg-demo-api-key": env.COINGECKO_KEY },
+    });
+    if (!res.ok) { dbg && dbg.push(`CGK:${res.status}`); return null; }
+    const arr = await res.json();
+    const d = arr && arr[0];
+    if (d && d.current_price != null) {
+      return { usd: d.current_price, idr: d.current_price * rate, chg: d.price_change_percentage_24h, cap: d.market_cap, vol: d.total_volume, rank: d.market_cap_rank, name: d.name, src: "CoinGecko" };
+    }
+    dbg && dbg.push("CGK:nodata"); return null;
+  } catch (e) { dbg && dbg.push("CGK:err"); return null; }
+}
 
-// Rantai sumber: CryptoCompare -> Indodax (ID) -> Binance -> CoinGecko.
+// Rantai sumber: CoinGecko(key) -> CryptoCompare -> Indodax -> Binance -> CoinGecko.
 async function quote(env, sym, cgId, dbg) {
   sym = (sym || "").toLowerCase();
   const cached = await env.GRUPACU.get(`q:${sym}`);
   if (cached) { try { return JSON.parse(cached); } catch { /* refetch */ } }
   const rate = await usdIdr(env);
   let q = null;
-  if (STABLE[sym] != null) q = { usd: STABLE[sym], chg: 0, idr: STABLE[sym] * rate };
+  if (!q && cgId) q = await srcCGKey(env, cgId, rate, dbg);
+  if (!q && STABLE[sym] != null) q = { usd: STABLE[sym], chg: 0, idr: STABLE[sym] * rate, src: "stable" };
   const U = sym.toUpperCase();
   if (!q) q = await srcCC(U, rate, dbg);
   if (!q) q = await srcIndodax(sym, rate, dbg);
@@ -991,23 +1008,60 @@ function changeStr(ch) {
   if (ch == null || isNaN(ch)) return "";
   return ch >= 0 ? `🟢 +${ch.toFixed(2)}%` : `🔴 ${ch.toFixed(2)}%`;
 }
+function fmtBig(n) {
+  if (!n) return "";
+  if (n >= 1e12) return (n / 1e12).toFixed(2) + "T";
+  if (n >= 1e9) return (n / 1e9).toFixed(2) + "B";
+  if (n >= 1e6) return (n / 1e6).toFixed(2) + "M";
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + "K";
+  return String(Math.round(n));
+}
 function priceLine(sym, q) {
   const chg = q.chg == null ? "" : "   " + changeStr(q.chg);
   return `${coinEmoji(sym)} <b>${sym.toUpperCase()}</b>  <b>$${fmtUsd(q.usd)}</b>${chg}\n<i>     Rp ${fmtIdr(q.idr)}</i>`;
 }
+// Kartu harga (teks) satu coin — ala kartu CoinGecko.
+function coinCard(sym, q, amount) {
+  const SYM = sym.toUpperCase(), e = coinEmoji(sym);
+  const L = [];
+  if (amount != null) {
+    L.push(`${e} <b>${fmtAmt(amount)} ${SYM}</b>${q.rank ? `   <i>#${q.rank}</i>` : ""}`);
+    L.push("➖➖➖➖➖➖➖");
+    L.push(`💵 <b>$ ${fmtUsd(amount * q.usd)}</b>`);
+    L.push(`🇮🇩 <b>Rp ${fmtIdr(amount * q.idr)}</b>`);
+    L.push("");
+    L.push(`<i>1 ${SYM} = $${fmtUsd(q.usd)}${q.chg != null ? "  " + changeStr(q.chg) : ""}</i>`);
+  } else {
+    L.push(`${e} <b>${SYM}</b>${q.rank ? `   <i>#${q.rank}</i>` : ""}`);
+    L.push("➖➖➖➖➖➖➖");
+    L.push(`💵 <b>$ ${fmtUsd(q.usd)}</b>${q.chg != null ? "   " + changeStr(q.chg) : ""}`);
+    L.push(`🇮🇩 <b>Rp ${fmtIdr(q.idr)}</b>`);
+  }
+  const stats = [];
+  if (q.cap) stats.push(`Cap $${fmtBig(q.cap)}`);
+  if (q.vol) stats.push(`Vol $${fmtBig(q.vol)}`);
+  if (stats.length) L.push("", `<i>📊 ${stats.join("  ·  ")}</i>`);
+  if (q.src && q.src !== "stable") L.push(`<i>Sumber: ${q.src}</i>`);
+  return L.join("\n");
+}
 
 async function sendPrice(env, chatId, arg) {
   const syms = [...new Set((arg || "btc").split(/\s+/).filter(Boolean).map((s) => s.toLowerCase()))].slice(0, 10);
-  const lines = [];
   const dbg = [];
+  // Satu coin -> kartu lengkap; banyak coin -> daftar ringkas.
+  if (syms.length === 1) {
+    const sl = syms[0];
+    const q = await quote(env, sl, await resolveCoinSearch(env, sl), dbg);
+    if (!q) return sendMessage(env, chatId, `❓ <b>${sl.toUpperCase()}</b> tak terbaca.\n<code>${htmlEsc(dbg.join(" · ") || "no source")}</code>`, { parse_mode: "HTML" });
+    return sendMessage(env, chatId, coinCard(sl, q, null), { parse_mode: "HTML" });
+  }
+  const lines = [];
   for (const sl of syms) {
-    const cgId = await resolveCoinSearch(env, sl);
-    const q = await quote(env, sl, cgId, dbg);
+    const q = await quote(env, sl, await resolveCoinSearch(env, sl), dbg);
     lines.push(q ? priceLine(sl, q) : `❓ <b>${sl.toUpperCase()}</b> tak terbaca`);
   }
-  const header = syms.length > 1 ? "💹 <b>Harga Kripto</b>  <i>(USD · IDR)</i>\n\n" : "";
-  const body = header + lines.join("\n\n") + (dbg.length ? `\n\n<code>${htmlEsc(dbg.join(" · "))}</code>` : "");
-  return sendMessage(env, chatId, body || "Gagal ambil harga, coba lagi.", { parse_mode: "HTML" });
+  const body = "💹 <b>Harga Kripto</b>  <i>(USD · IDR)</i>\n\n" + lines.join("\n\n");
+  return sendMessage(env, chatId, body, { parse_mode: "HTML" });
 }
 
 // Diagnosa: cek tiap sumber harga, tampilkan HTTP status + cuplikan.
@@ -1032,18 +1086,7 @@ async function sendConvert(env, chatId, amount, sym, id) {
   const dbg = [];
   const q = await quote(env, sym, id, dbg);
   if (!q) return sendMessage(env, chatId, `Gagal ambil harga ${sym.toUpperCase()}.\n<code>${htmlEsc(dbg.join(" · ") || "no source")}</code>`, { parse_mode: "HTML" });
-  const SYM = sym.toUpperCase();
-  const chg = q.chg == null ? "" : "   " + changeStr(q.chg);
-  return sendMessage(env, chatId,
-    [
-      `${coinEmoji(sym)} <b>${fmtAmt(amount)} ${SYM}</b>`,
-      "➖➖➖➖➖➖➖",
-      `💵 <b>$ ${fmtUsd(amount * q.usd)}</b>`,
-      `🇮🇩 <b>Rp ${fmtIdr(amount * q.idr)}</b>`,
-      "",
-      `<i>1 ${SYM} = $${fmtUsd(q.usd)}${chg}</i>`,
-    ].join("\n"),
-    { parse_mode: "HTML" });
+  return sendMessage(env, chatId, coinCard(sym, q, amount), { parse_mode: "HTML" });
 }
 function fmtAmt(n) {
   if (Number.isInteger(n)) return thousands(String(n), ",");
