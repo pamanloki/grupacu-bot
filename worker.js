@@ -262,6 +262,7 @@ async function onGroupCommand(env, chat, from, text, msg) {
   const chatId = chat.id;
 
   if (cmd === "/start" || cmd === "/help") return sendMessage(env, chatId, helpText());
+  if (cmd === "/menu") return sendMainMenu(env, chatId);
   if (cmd === "/daftar" || cmd === "/join" || cmd === "/gass") {
     await registerMember(env, from);
     await setReaction(env, chatId, msg.message_id, "✅");
@@ -357,6 +358,7 @@ async function onPrivate(env, chatId, from, text, msg) {
     return sendMessage(env, chatId, dmHelpText());
   }
   if (cmd === "/help") return sendMessage(env, chatId, dmHelpText());
+  if (cmd === "/menu") return sendMainMenu(env, chatId);
   if (cmd === "/daftar" || cmd === "/join" || cmd === "/gass") {
     await registerMember(env, from);
     return sendMessage(env, chatId, "✅ Terdaftar! Kamu masuk roster grup.");
@@ -922,6 +924,18 @@ async function handleReset(env, chatId, arg) {
 // Callback (tombol)
 // ---------------------------------------------------------------------------
 
+// 📋 Menu utama — semua fitur dalam tombol (biar tak perlu hafal command).
+async function sendMainMenu(env, chatId) {
+  const rows = [
+    [{ text: "📊 Papan (board)", callback_data: "board" }, { text: "🗓️ Kalender", callback_data: "m:cal" }],
+    [{ text: "👛 Akun", callback_data: "acctlist" }, { text: "🗂️ Airdrop", callback_data: "m:air" }],
+    [{ text: "📈 Statistik", callback_data: "m:stats" }, { text: "💸 Modal/ROI", callback_data: "m:roi" }],
+    [{ text: "⛽ Gas", callback_data: "m:gas" }, { text: "😱 Fear&Greed", callback_data: "m:fgi" }],
+    [{ text: "👀 Wallet dilacak", callback_data: "m:watch" }, { text: "🏆 Leaderboard", callback_data: "lb:all" }],
+  ];
+  return sendMessage(env, chatId, "📋 <b>MENU GRUPACU</b>\nPilih fitur:", { parse_mode: "HTML", reply_markup: { inline_keyboard: rows } });
+}
+
 async function onCallback(env, cq) {
   const data = cq.data || "";
   const chatId = cq.message && cq.message.chat && cq.message.chat.id;
@@ -933,6 +947,14 @@ async function onCallback(env, cq) {
   }
   await answerCallback(env, cq.id);
   if (!chatId) return;
+  if (data === "menu") return sendMainMenu(env, chatId);
+  if (data === "m:cal") return sendCalendar(env, chatId);
+  if (data === "m:air") return listAirdrops(env, chatId);
+  if (data === "m:stats") return sendStats(env, chatId);
+  if (data === "m:roi") return sendRoi(env, chatId);
+  if (data === "m:gas") return sendGas(env, chatId);
+  if (data === "m:fgi") return sendFgi(env, chatId);
+  if (data === "m:watch") return listWatches(env, chatId);
   if (data === "lb:week") return sendLeaderboard(env, chatId, "week");
   if (data === "lb:all") return sendLeaderboard(env, chatId, "all");
   if (data === "tlist") return sendTasksList(env, chatId);
