@@ -898,24 +898,44 @@ async function resolveCoinSearch(env, sym) {
   return null;
 }
 
-// Ambil harga (usd, idr, 24j) dengan cache 60 detik.
-async function cgPrice(env, ids) {
-  const out = {}, need = [];
-  for (const id of ids) {
-    const c = await env.GRUPACU.get(`px:${id}`);
-    if (c) { try { out[id] = JSON.parse(c); continue; } catch { /* refetch */ } }
-    need.push(id);
-  }
-  if (need.length) {
+// Kurs USD->IDR (cache 6 jam). Dipakai untuk harga IDR dari sumber USD.
+async function usdIdr(env) {
+  const c = await env.GRUPACU.get("fxidr");
+  if (c) return +c;
+  try {
+    const r = await fetch("https://open.er-api.com/v6/latest/USD").then((x) => x.json());
+    const rate = r && r.rates && r.rates.IDR;
+    if (rate) { await env.GRUPACU.put("fxidr", String(rate), { expirationTtl: 21600 }); return rate; }
+  } catch { /* abaikan */ }
+  return 16000; // fallback kasar kalau FX API gagal
+}
+
+const STABLE = { usdt: 1, usdc: 1, dai: 1, fdusd: 1, tusd: 1, busd: 1 };
+
+// Ambil quote sebuah coin: { usd, idr, chg }. Binance dulu (paling stabil dari
+// Worker), fallback CoinGecko. Cache 60 detik per symbol.
+async function quote(env, sym, cgId) {
+  sym = (sym || "").toLowerCase();
+  const cached = await env.GRUPACU.get(`q:${sym}`);
+  if (cached) { try { return JSON.parse(cached); } catch { /* refetch */ } }
+  const rate = await usdIdr(env);
+  let q = null;
+  if (STABLE[sym] != null) q = { usd: STABLE[sym], chg: 0, idr: STABLE[sym] * rate };
+  if (!q) {
     try {
-      const url = `https://api.coingecko.com/api/v3/simple/price?ids=${need.join(",")}&vs_currencies=usd,idr&include_24hr_change=true`;
-      const r = await fetch(url, { headers: { accept: "application/json" } }).then((x) => x.json());
-      for (const id of need) {
-        if (r && r[id]) { out[id] = r[id]; await env.GRUPACU.put(`px:${id}`, JSON.stringify(r[id]), { expirationTtl: 60 }); }
-      }
+      const r = await fetch(`https://api.binance.com/api/v3/ticker/24hr?symbol=${sym.toUpperCase()}USDT`).then((x) => x.json());
+      if (r && r.lastPrice) { const usd = +r.lastPrice; q = { usd, chg: +r.priceChangePercent, idr: usd * rate }; }
+    } catch { /* lanjut fallback */ }
+  }
+  if (!q && cgId) {
+    try {
+      const r = await fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${cgId}&vs_currencies=usd,idr&include_24hr_change=true`, { headers: { accept: "application/json" } }).then((x) => x.json());
+      const d = r && r[cgId];
+      if (d && d.usd != null) q = { usd: d.usd, chg: d.usd_24h_change, idr: d.idr != null ? d.idr : d.usd * rate };
     } catch { /* abaikan */ }
   }
-  return out;
+  if (q) await env.GRUPACU.put(`q:${sym}`, JSON.stringify(q), { expirationTtl: 60 });
+  return q;
 }
 
 function thousands(s, sep) { return s.replace(/\B(?=(\d{3})+(?!\d))/g, sep); }
@@ -929,34 +949,26 @@ function changeStr(ch) {
   if (ch == null || isNaN(ch)) return "";
   return `${ch >= 0 ? "🟢▲" : "🔴▼"}${Math.abs(ch).toFixed(2)}%`;
 }
-function priceLine(sym, d) {
-  return `<b>${sym.toUpperCase()}</b>  $${fmtUsd(d.usd)}  ${changeStr(d.usd_24h_change)}\n   Rp ${fmtIdr(d.idr)}`;
+function priceLine(sym, q) {
+  return `<b>${sym.toUpperCase()}</b>  $${fmtUsd(q.usd)}  ${changeStr(q.chg)}\n   Rp ${fmtIdr(q.idr)}`;
 }
 
 async function sendPrice(env, chatId, arg) {
-  const syms = (arg || "btc").split(/\s+/).filter(Boolean).slice(0, 10);
-  const map = {};
-  for (const s of syms) { const id = await resolveCoinSearch(env, s.toLowerCase()); if (id) map[s.toLowerCase()] = id; }
-  const ids = [...new Set(Object.values(map))];
-  if (!ids.length) return sendMessage(env, chatId, "Coin nggak ketemu. Contoh: /p btc eth sol");
-  const data = await cgPrice(env, ids);
-  const seen = new Set();
+  const syms = [...new Set((arg || "btc").split(/\s+/).filter(Boolean).map((s) => s.toLowerCase()))].slice(0, 10);
   const lines = [];
-  for (const s of syms) {
-    const sl = s.toLowerCase(), id = map[sl];
-    if (!id || !data[id] || seen.has(sl)) { if (!id) lines.push(`❓ ${sl.toUpperCase()} tak ditemukan`); continue; }
-    seen.add(sl);
-    lines.push(priceLine(sl, data[id]));
+  for (const sl of syms) {
+    const cgId = await resolveCoinSearch(env, sl);
+    const q = await quote(env, sl, cgId);
+    lines.push(q ? priceLine(sl, q) : `❓ ${sl.toUpperCase()} tak ditemukan`);
   }
   return sendMessage(env, chatId, lines.join("\n") || "Gagal ambil harga, coba lagi.", { parse_mode: "HTML" });
 }
 
 async function sendConvert(env, chatId, amount, sym, id) {
-  const data = await cgPrice(env, [id]);
-  const d = data[id];
-  if (!d) return sendMessage(env, chatId, "Gagal ambil harga, coba lagi.");
+  const q = await quote(env, sym, id);
+  if (!q) return sendMessage(env, chatId, "Gagal ambil harga, coba lagi.");
   return sendMessage(env, chatId,
-    `💱 <b>${amount} ${sym.toUpperCase()}</b> ≈\n   $${fmtUsd(amount * d.usd)}\n   Rp ${fmtIdr(amount * d.idr)}\n\n1 ${sym.toUpperCase()} = $${fmtUsd(d.usd)} ${changeStr(d.usd_24h_change)}`,
+    `💱 <b>${amount} ${sym.toUpperCase()}</b> ≈\n   $${fmtUsd(amount * q.usd)}\n   Rp ${fmtIdr(amount * q.idr)}\n\n1 ${sym.toUpperCase()} = $${fmtUsd(q.usd)} ${changeStr(q.chg)}`,
     { parse_mode: "HTML" });
 }
 
@@ -1013,15 +1025,15 @@ async function runAlerts(env) {
     cursor = res.list_complete ? null : res.cursor;
   } while (cursor);
   if (!alerts.length) return;
-  const ids = [...new Set(alerts.map((a) => a.id))];
-  const data = await cgPrice(env, ids);
+  const qcache = {};
   for (const a of alerts) {
-    const d = data[a.id];
-    if (!d) continue;
-    const hit = a.op === ">" ? d.usd >= a.target : d.usd <= a.target;
+    if (qcache[a.sym] === undefined) qcache[a.sym] = await quote(env, a.sym, a.id);
+    const q = qcache[a.sym];
+    if (!q) continue;
+    const hit = a.op === ">" ? q.usd >= a.target : q.usd <= a.target;
     if (!hit) continue;
     await sendMessage(env, a.chatId,
-      `🔔 <b>ALERT</b> <a href="tg://user?id=${a.uid}">${htmlEsc(a.name)}</a>\n${a.sym.toUpperCase()} sekarang <b>$${fmtUsd(d.usd)}</b> (target ${a.op} $${fmtUsd(a.target)})`,
+      `🔔 <b>ALERT</b> <a href="tg://user?id=${a.uid}">${htmlEsc(a.name)}</a>\n${a.sym.toUpperCase()} sekarang <b>$${fmtUsd(q.usd)}</b> (target ${a.op} $${fmtUsd(a.target)})`,
       { parse_mode: "HTML" });
     await env.GRUPACU.delete(a.key);
   }
