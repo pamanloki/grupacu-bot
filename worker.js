@@ -1175,33 +1175,42 @@ async function sendFgi(env, chatId) {
 // ---------------------------------------------------------------------------
 
 function fmtGwei(n) { return n >= 10 ? String(Math.round(n)) : n.toFixed(2); }
+// fetch dengan timeout (biar tak nyangkut kalau RPC lambat).
+async function fetchT(url, opts, ms) {
+  const c = new AbortController();
+  const t = setTimeout(() => c.abort(), ms || 6000);
+  try { return await fetch(url, { ...(opts || {}), signal: c.signal }); }
+  finally { clearTimeout(t); }
+}
 async function ethGasGwei(dbg) {
   const rpcs = [
     ["publicnode", "https://ethereum-rpc.publicnode.com"],
-    ["cloudflare", "https://cloudflare-eth.com"],
     ["llamarpc", "https://eth.llamarpc.com"],
+    ["drpc", "https://eth.drpc.org"],
     ["1rpc", "https://1rpc.io/eth"],
     ["ankr", "https://rpc.ankr.com/eth"],
   ];
   for (const [name, url] of rpcs) {
     try {
-      const res = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", method: "eth_gasPrice", params: [], id: 1 }) });
+      const res = await fetchT(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", method: "eth_gasPrice", params: [], id: 1 }) }, 6000);
       if (!res.ok) { dbg && dbg.push(`${name}:${res.status}`); continue; }
       const r = await res.json();
       if (r && r.result) { const g = parseInt(r.result, 16) / 1e9; if (g > 0) return g; }
       dbg && dbg.push(`${name}:nodata`);
-    } catch (e) { dbg && dbg.push(`${name}:err`); }
+    } catch (e) { dbg && dbg.push(`${name}:${e && e.name === "AbortError" ? "timeout" : "err"}`); }
   }
   return null;
 }
 async function sendGas(env, chatId) {
-  const cached = await env.GRUPACU.get("gasgwei");
-  const dbg = [];
-  let gwei = cached ? +cached : await ethGasGwei(dbg);
+  let gwei = null, dbg = [];
+  try {
+    const cached = await env.GRUPACU.get("gasgwei");
+    gwei = cached ? +cached : await ethGasGwei(dbg);
+    if (gwei != null && !cached) await env.GRUPACU.put("gasgwei", String(gwei), { expirationTtl: 30 });
+  } catch (e) { dbg.push("x:" + (e && e.message ? e.message.slice(0, 40) : "err")); }
   if (gwei == null) return sendMessage(env, chatId, `⛽ Gagal ambil data gas.\n<code>${htmlEsc(dbg.join(" · ") || "no rpc")}</code>`, { parse_mode: "HTML" });
-  if (!cached) await env.GRUPACU.put("gasgwei", String(gwei), { expirationTtl: 30 });
-  const eth = await quote(env, "eth", "ethereum");
-  const ethUsd = eth ? eth.usd : 0;
+  let ethUsd = 0;
+  try { const eth = await quote(env, "eth", "ethereum"); ethUsd = eth ? eth.usd : 0; } catch { /* biarkan 0 */ }
   const cost = (gas) => ethUsd ? "$" + fmtUsd(gas * gwei * 1e-9 * ethUsd) : "-";
   const slow = gwei * 0.9, fast = gwei * 1.3;
   return sendMessage(env, chatId, [
