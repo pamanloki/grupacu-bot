@@ -979,12 +979,21 @@ function fmtUsd(n) {
   if (n >= 0.0001) return n.toFixed(6).replace(/0+$/, "").replace(/\.$/, "");
   return n.toFixed(10).replace(/0+$/, "").replace(/\.$/, ""); // meme coin: 0.0000082
 }
+const COIN_EMOJI = {
+  btc: "🟠", eth: "🔷", usdt: "💵", usdc: "💵", bnb: "🟡", sol: "🟣", xrp: "⚫",
+  doge: "🐕", ada: "🔵", matic: "🟪", pol: "🟪", ton: "🔹", trx: "🔺", shib: "🐕",
+  pepe: "🐸", link: "🔗", avax: "🔺", dot: "⚪", near: "🟢", sui: "💧", op: "🔴",
+  arb: "🔵", ltc: "⚪", bch: "🟢", atom: "⚛️", uni: "🦄", wld: "🌐", not: "🪙",
+};
+function coinEmoji(sym) { return COIN_EMOJI[sym.toLowerCase()] || "🪙"; }
+
 function changeStr(ch) {
   if (ch == null || isNaN(ch)) return "";
-  return `${ch >= 0 ? "🟢▲" : "🔴▼"}${Math.abs(ch).toFixed(2)}%`;
+  return ch >= 0 ? `🟢 +${ch.toFixed(2)}%` : `🔴 ${ch.toFixed(2)}%`;
 }
 function priceLine(sym, q) {
-  return `<b>${sym.toUpperCase()}</b>  $${fmtUsd(q.usd)}  ${changeStr(q.chg)}\n   Rp ${fmtIdr(q.idr)}`;
+  const chg = q.chg == null ? "" : "   " + changeStr(q.chg);
+  return `${coinEmoji(sym)} <b>${sym.toUpperCase()}</b>  <b>$${fmtUsd(q.usd)}</b>${chg}\n<i>     Rp ${fmtIdr(q.idr)}</i>`;
 }
 
 async function sendPrice(env, chatId, arg) {
@@ -994,9 +1003,10 @@ async function sendPrice(env, chatId, arg) {
   for (const sl of syms) {
     const cgId = await resolveCoinSearch(env, sl);
     const q = await quote(env, sl, cgId, dbg);
-    lines.push(q ? priceLine(sl, q) : `❓ ${sl.toUpperCase()} tak terbaca`);
+    lines.push(q ? priceLine(sl, q) : `❓ <b>${sl.toUpperCase()}</b> tak terbaca`);
   }
-  const body = lines.join("\n") + (dbg.length ? `\n\n<code>${htmlEsc(dbg.join(" · "))}</code>` : "");
+  const header = syms.length > 1 ? "💹 <b>Harga Kripto</b>  <i>(USD · IDR)</i>\n\n" : "";
+  const body = header + lines.join("\n\n") + (dbg.length ? `\n\n<code>${htmlEsc(dbg.join(" · "))}</code>` : "");
   return sendMessage(env, chatId, body || "Gagal ambil harga, coba lagi.", { parse_mode: "HTML" });
 }
 
@@ -1022,10 +1032,22 @@ async function sendConvert(env, chatId, amount, sym, id) {
   const dbg = [];
   const q = await quote(env, sym, id, dbg);
   if (!q) return sendMessage(env, chatId, `Gagal ambil harga ${sym.toUpperCase()}.\n<code>${htmlEsc(dbg.join(" · ") || "no source")}</code>`, { parse_mode: "HTML" });
-  const chg = q.chg == null ? "" : changeStr(q.chg);
+  const SYM = sym.toUpperCase();
+  const chg = q.chg == null ? "" : "   " + changeStr(q.chg);
   return sendMessage(env, chatId,
-    `💱 <b>${amount} ${sym.toUpperCase()}</b> ≈\n   $${fmtUsd(amount * q.usd)}\n   Rp ${fmtIdr(amount * q.idr)}\n\n1 ${sym.toUpperCase()} = $${fmtUsd(q.usd)} ${chg}`,
+    [
+      `${coinEmoji(sym)} <b>${fmtAmt(amount)} ${SYM}</b>`,
+      "➖➖➖➖➖➖➖",
+      `💵 <b>$ ${fmtUsd(amount * q.usd)}</b>`,
+      `🇮🇩 <b>Rp ${fmtIdr(amount * q.idr)}</b>`,
+      "",
+      `<i>1 ${SYM} = $${fmtUsd(q.usd)}${chg}</i>`,
+    ].join("\n"),
     { parse_mode: "HTML" });
+}
+function fmtAmt(n) {
+  if (Number.isInteger(n)) return thousands(String(n), ",");
+  return String(n);
 }
 
 // --- Alert harga ---
