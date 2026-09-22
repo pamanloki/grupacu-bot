@@ -257,6 +257,7 @@ async function onGroupCommand(env, chat, from, text, msg) {
   // Admin only
   if (!isAdmin(env, from.id)) return;
   if (cmd === "/bind") return bindGroup(env, chat);
+  if (cmd === "/pdebug") return sendPriceDebug(env, chatId, arg || "btc");
   if (cmd === "/setup") return sendMessage(env, chatId, setupText(env));
   if (cmd === "/markers") return handleMarkers(env, chatId, arg);
   if (cmd === "/wallets") return exportWallets(env, chatId);
@@ -328,6 +329,7 @@ async function onPrivate(env, chatId, from, text, msg) {
     if (cmd === "/wallets") return exportWallets(env, chatId);
     if (cmd === "/refboard") return sendRefBoard(env, chatId);
     if (cmd === "/setup") return sendMessage(env, chatId, setupText(env));
+    if (cmd === "/pdebug") return sendPriceDebug(env, chatId, arg || "btc");
   }
 
   // Bukan perintah -> anggap submit wallet kalau bentuknya alamat.
@@ -976,6 +978,24 @@ async function sendPrice(env, chatId, arg) {
     lines.push(q ? priceLine(sl, q) : `❓ ${sl.toUpperCase()} tak ditemukan`);
   }
   return sendMessage(env, chatId, lines.join("\n") || "Gagal ambil harga, coba lagi.", { parse_mode: "HTML" });
+}
+
+// Diagnosa: cek tiap sumber harga, tampilkan HTTP status + cuplikan.
+async function sendPriceDebug(env, chatId, sym) {
+  const U = (sym || "btc").toUpperCase();
+  const out = [`🔧 Debug harga ${U}`];
+  const probe = async (label, url) => {
+    try {
+      const res = await fetch(url, { headers: { accept: "application/json" } });
+      const t = await res.text();
+      out.push(`${label}: HTTP ${res.status}\n${t.slice(0, 140)}`);
+    } catch (e) { out.push(`${label}: ERROR ${e && e.message ? e.message : e}`); }
+  };
+  await probe("CryptoCompare", `https://min-api.cryptocompare.com/data/pricemultifull?fsyms=${U}&tsyms=USD,IDR`);
+  await probe("Binance", `https://api.binance.com/api/v3/ticker/price?symbol=${U}USDT`);
+  await probe("CoinGecko", `https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd`);
+  await probe("KursIDR", `https://open.er-api.com/v6/latest/USD`);
+  return sendMessage(env, chatId, out.join("\n\n"));
 }
 
 async function sendConvert(env, chatId, amount, sym, id) {
