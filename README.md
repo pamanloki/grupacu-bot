@@ -52,7 +52,15 @@ menandai "done" di grup diskusi, dan bot mencatat per orang.
 
 **Papan progres multi-akun** (buat farming pribadi): `/akun add <nama>` daftarkan
 akun/wallet-mu, lalu `/board` — tiap airdrop bisa dicentang **per akun** (mis.
-*Airdrop X → Akun A ✅, Akun B ⬜*). Data di KV: `accts`, `ap:<aid>`.
+*Airdrop X → Akun A ✅, Akun B ⬜*), diberi **status** (🟢 ongoing → 📸 snapshot →
+🚀 TGE → 💰 distributed), **modal**, dan **catatan cara garap**. Yang sudah
+distributed otomatis disembunyikan (`/board all` untuk tampilkan).
+
+- `/stats` — ringkasan (jumlah per status, akun, total modal).
+- `/roi` — rekap modal semua airdrop.
+- `/modal <nama> | <$>` — catat modal gas · `/note <nama> | <cara>` — simpan cara garap.
+
+Data di KV: `accts`, `ap:<aid>`, `stt:<aid>` (status), `cost:<aid>`, `nx:<aid>`.
 
 **Admin:** `/bind` `/setup` `/markers` `/announce on|off` `/digest on|off`
 `/addairdrop` `/deadline 12h` `/nudge` `/members` `/wallets` `/refboard`

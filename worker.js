@@ -263,8 +263,12 @@ async function onGroupCommand(env, chat, from, text, msg) {
   if (cmd === "/fgi" || cmd === "/feargreed") return sendFgi(env, chatId, th);
   if (cmd === "/conv" || cmd === "/convert") return doConvCmd(env, chatId, arg, th);
   if (cmd === "/airdrops" || cmd === "/airdrop") return listAirdrops(env, chatId);
-  if (cmd === "/calendar" || cmd === "/kalender" || cmd === "/cal") return sendCalendar(env, chatId);
-  if (cmd === "/board" || cmd === "/papan" || cmd === "/progress") return sendBoard(env, chatId);
+  if (cmd === "/calendar" || cmd === "/kalender" || cmd === "/cal") return sendCalendar(env, chatId, /^all|semua$/i.test(arg));
+  if (cmd === "/board" || cmd === "/papan" || cmd === "/progress") return sendBoard(env, chatId, /^all|semua$/i.test(arg));
+  if (cmd === "/stats" || cmd === "/statistik") return sendStats(env, chatId);
+  if (cmd === "/roi" || cmd === "/modalku") return sendRoi(env, chatId);
+  if (cmd === "/modal") return handleModal(env, chatId, arg);
+  if (cmd === "/note" || cmd === "/catatan") return handleNote(env, chatId, arg);
   if (cmd === "/akun" || cmd === "/akunku" || cmd === "/accounts") return handleAccounts(env, chatId, arg);
   if (cmd === "/alert") return addAlert(env, chatId, from, arg);
   if (cmd === "/alerts") return listAlerts(env, chatId, from);
@@ -341,8 +345,12 @@ async function onPrivate(env, chatId, from, text, msg) {
   if (cmd === "/fgi" || cmd === "/feargreed") return sendFgi(env, chatId);
   if (cmd === "/conv" || cmd === "/convert") return doConvCmd(env, chatId, arg);
   if (cmd === "/airdrops" || cmd === "/airdrop") return listAirdrops(env, chatId);
-  if (cmd === "/calendar" || cmd === "/kalender" || cmd === "/cal") return sendCalendar(env, chatId);
-  if (cmd === "/board" || cmd === "/papan" || cmd === "/progress") return sendBoard(env, chatId);
+  if (cmd === "/calendar" || cmd === "/kalender" || cmd === "/cal") return sendCalendar(env, chatId, /^all|semua$/i.test(arg));
+  if (cmd === "/board" || cmd === "/papan" || cmd === "/progress") return sendBoard(env, chatId, /^all|semua$/i.test(arg));
+  if (cmd === "/stats" || cmd === "/statistik") return sendStats(env, chatId);
+  if (cmd === "/roi" || cmd === "/modalku") return sendRoi(env, chatId);
+  if (cmd === "/modal") return handleModal(env, chatId, arg);
+  if (cmd === "/note" || cmd === "/catatan") return handleNote(env, chatId, arg);
   if (cmd === "/akun" || cmd === "/akunku" || cmd === "/accounts") return handleAccounts(env, chatId, arg);
   if (cmd === "/alert") return addAlert(env, chatId, from, arg);
   if (cmd === "/alerts") return listAlerts(env, chatId, from);
@@ -577,7 +585,10 @@ async function runDigest(env) {
   const today = `${d.getUTCFullYear()}-${d.getUTCMonth() + 1}-${d.getUTCDate()}`;
   if (cfg.lastDigest === today) return; // sudah dikirim hari ini
 
-  const rows = (await airdropsByDeadline(env)).filter((r) => !(r.it.type === "task" && r.it.t.closed));
+  let rows = (await airdropsByDeadline(env)).filter((r) => !(r.it.type === "task" && r.it.t.closed));
+  const keptD = [];
+  for (const r of rows) if ((await getStatus(env, aidOf(r.it))) !== "done") keptD.push(r);
+  rows = keptD; // jangan tampilkan yang sudah distributed
   cfg.lastDigest = today; // tandai lebih dulu biar tak dobel walau tak ada isi
   await saveConfig(env, cfg);
   if (!rows.length) return;
@@ -891,6 +902,7 @@ async function onCallback(env, cq) {
   if (data === "tlist") return sendTasksList(env, chatId);
   if (data.startsWith("t:")) return sendTaskDetail(env, chatId, data.slice(2));
   if (data === "board") return sendBoard(env, chatId);
+  if (data === "board:all") return sendBoard(env, chatId, true);
   if (data === "acctlist") return handleAccounts(env, chatId, "");
   if (data.startsWith("bd:")) return sendBoardAirdrop(env, chatId, data.slice(3), cq);
   if (data.startsWith("bt:")) {
@@ -1417,9 +1429,14 @@ async function airdropsByDeadline(env) {
 }
 
 // 🗓️ /calendar — airdrop diurut dari deadline terdekat + countdown + progress garap.
-async function sendCalendar(env, chatId) {
+async function sendCalendar(env, chatId, showAll) {
   const cfg = await getConfig(env);
-  const rows = await airdropsByDeadline(env);
+  let rows = await airdropsByDeadline(env);
+  if (!showAll) {
+    const kept = [];
+    for (const r of rows) if ((await getStatus(env, aidOf(r.it))) !== "done") kept.push(r);
+    rows = kept;
+  }
   if (!rows.length) {
     return sendMessage(env, chatId, "🗓️ Belum ada airdrop. Admin tandai lewat /addairdrop (deadline: /addairdrop 3d).");
   }
@@ -1434,6 +1451,7 @@ async function sendCalendar(env, chatId) {
     // Progres per akun (kalau kamu pakai /board), fallback ke done member.
     let prog = "";
     if (accts.length) { const p = await getProg(env, aid); prog = ` · 👛${accts.filter((a) => p[a]).length}/${accts.length} akun`; }
+    const note = await getNote(env, aid);
     if (it.type === "task") {
       const t = it.t;
       const done = await countDone(env, t.id);
@@ -1443,10 +1461,12 @@ async function sendCalendar(env, chatId) {
       const memb = !accts.length && totalMember ? ` · ✅${done}/${totalMember}` : "";
       lines.push(`${n}. ${st.emoji} <b>${htmlEsc(t.title)}</b>`);
       lines.push(`   ${cd}${when}${prog}${memb}`);
+      if (note) lines.push(`   📝 <i>${htmlEsc(note)}</i>`);
       if (link) lines.push(`   🔗 ${link}`);
     } else {
       const a = it.a;
       lines.push(`${n}. ${st.emoji} <b>${htmlEsc(a.name)}</b>${a.note ? ` — <i>${htmlEsc(a.note)}</i>` : ""}${prog}`);
+      if (note) lines.push(`   📝 <i>${htmlEsc(note)}</i>`);
       if (a.link) lines.push(`   🔗 ${htmlEsc(a.link)}`);
     }
     n++;
@@ -1510,6 +1530,87 @@ function statusMeta(key) { return STATUSES.find((s) => s.key === key) || STATUSE
 async function getStatus(env, aid) { return (await env.GRUPACU.get(`stt:${aid}`)) || "ongoing"; }
 async function saveStatus(env, aid, key) { await env.GRUPACU.put(`stt:${aid}`, key); }
 
+// Modal (gas) & catatan cara-garap per airdrop.
+async function getCost(env, aid) { const v = await env.GRUPACU.get(`cost:${aid}`); return v ? Number(v) || 0 : 0; }
+async function getNote(env, aid) { return (await env.GRUPACU.get(`nx:${aid}`)) || ""; }
+// Cari airdrop dari potongan nama (buat /modal /note tanpa perlu id).
+async function findAirdrop(env, q) {
+  q = (q || "").toLowerCase().trim();
+  if (!q) return null;
+  const items = await airdropItems(env);
+  return items.find((it) => aidLabel(it).toLowerCase().includes(q)) || null;
+}
+
+// /modal <nama> | <jumlah $> — catat modal gas airdrop.
+async function handleModal(env, chatId, arg) {
+  const [q, amtRaw] = (arg || "").split("|").map((s) => s.trim());
+  if (!q || !amtRaw) return sendMessage(env, chatId, "Cara: <code>/modal &lt;nama&gt; | &lt;jumlah $&gt;</code>\nmis: <code>/modal galxe | 12.5</code>", { parse_mode: "HTML" });
+  const it = await findAirdrop(env, q);
+  if (!it) return sendMessage(env, chatId, `Airdrop "${htmlEsc(q)}" tak ketemu. Lihat /board.`, { parse_mode: "HTML" });
+  const amt = Number(String(amtRaw).replace(/[^\d.]/g, "")) || 0;
+  await env.GRUPACU.put(`cost:${aidOf(it)}`, String(amt));
+  return sendMessage(env, chatId, `💸 Modal <b>${htmlEsc(aidLabel(it))}</b>: $${amt}\nRekap: /roi`, { parse_mode: "HTML" });
+}
+
+// /note <nama> | <isi> — simpan cara garap airdrop (biar konsisten tiap akun).
+async function handleNote(env, chatId, arg) {
+  const idx = (arg || "").indexOf("|");
+  if (idx < 0) return sendMessage(env, chatId, "Cara: <code>/note &lt;nama&gt; | &lt;cara garap&gt;</code>\nmis: <code>/note galxe | bridge → swap → mint NFT</code>", { parse_mode: "HTML" });
+  const q = arg.slice(0, idx).trim(), note = arg.slice(idx + 1).trim().slice(0, 400);
+  const it = await findAirdrop(env, q);
+  if (!it) return sendMessage(env, chatId, `Airdrop "${htmlEsc(q)}" tak ketemu. Lihat /board.`, { parse_mode: "HTML" });
+  if (!note) { await env.GRUPACU.delete(`nx:${aidOf(it)}`); return sendMessage(env, chatId, `🗑️ Catatan ${htmlEsc(aidLabel(it))} dihapus.`, { parse_mode: "HTML" }); }
+  await env.GRUPACU.put(`nx:${aidOf(it)}`, note);
+  return sendMessage(env, chatId, `📝 Catatan <b>${htmlEsc(aidLabel(it))}</b> disimpan.`, { parse_mode: "HTML" });
+}
+
+// /roi — rekap modal semua airdrop.
+async function sendRoi(env, chatId) {
+  const items = await airdropItems(env);
+  if (!items.length) return sendMessage(env, chatId, "Belum ada airdrop. Tandai lewat /addairdrop.");
+  const lines = ["💸 <b>MODAL / ROI</b>", ""];
+  let total = 0, n = 1;
+  for (const it of items) {
+    const aid = aidOf(it);
+    const cost = await getCost(env, aid);
+    const st = statusMeta(await getStatus(env, aid));
+    total += cost;
+    lines.push(`${n}. ${st.emoji} ${htmlEsc(aidLabel(it))} — modal $${cost}`);
+    n++;
+  }
+  lines.push("", `Total modal keluar: <b>$${total.toFixed(2)}</b>`);
+  lines.push("<i>Set: /modal &lt;nama&gt; | &lt;jumlah&gt;</i>");
+  return sendMessage(env, chatId, lines.join("\n"), { parse_mode: "HTML" });
+}
+
+// /stats — ringkasan cepat semua airdrop.
+async function sendStats(env, chatId) {
+  const items = await airdropItems(env);
+  const accts = await getAccts(env);
+  const by = { ongoing: 0, snapshot: 0, tge: 0, done: 0 };
+  let totalCost = 0, fullyDone = 0;
+  for (const it of items) {
+    const aid = aidOf(it);
+    const stk = await getStatus(env, aid);
+    by[stk] = (by[stk] || 0) + 1;
+    totalCost += await getCost(env, aid);
+    if (accts.length) { const p = await getProg(env, aid); if (accts.every((a) => p[a])) fullyDone++; }
+  }
+  const active = items.filter((it) => !(it.type === "task" && it.t.closed));
+  const lines = [
+    "📊 <b>STATISTIK AIRDROP</b>", "",
+    `🗂️ Total airdrop: <b>${items.length}</b> (aktif ${active.length})`,
+    `👛 Akun terdaftar: <b>${accts.length}</b>`,
+    accts.length ? `✅ Kelar di semua akun: <b>${fullyDone}</b>/${items.length}` : "",
+    "",
+    "Per status:",
+    `🟢 Ongoing ${by.ongoing} · 📸 Snapshot ${by.snapshot} · 🚀 TGE ${by.tge} · 💰 Distributed ${by.done}`,
+    "",
+    `💸 Total modal keluar: <b>$${totalCost.toFixed(2)}</b>`,
+  ].filter((x) => x !== "");
+  return sendMessage(env, chatId, lines.join("\n"), { parse_mode: "HTML" });
+}
+
 async function getAccts(env) {
   const raw = await env.GRUPACU.get("accts");
   try { const a = raw ? JSON.parse(raw) : []; return Array.isArray(a) ? a : []; } catch { return []; }
@@ -1551,19 +1652,24 @@ async function handleAccounts(env, chatId, arg) {
 }
 
 // /board — daftar airdrop aktif + berapa akun yang sudah garap; tap buat centang.
-async function sendBoard(env, chatId) {
+// showAll=true ikut tampilkan yang sudah 💰 distributed.
+async function sendBoard(env, chatId, showAll) {
   const accts = await getAccts(env);
   if (!accts.length) return sendMessage(env, chatId, "Tambah akunmu dulu: <code>/akun add Akun1</code>", { parse_mode: "HTML" });
-  const items = (await airdropItems(env)).filter((it) => !(it.type === "task" && it.t.closed));
-  if (!items.length) return sendMessage(env, chatId, "Belum ada airdrop aktif. Tandai lewat /addairdrop.");
+  let items = (await airdropItems(env)).filter((it) => !(it.type === "task" && it.t.closed));
   const rows = [];
+  let hidden = 0;
   for (const it of items) {
     const aid = aidOf(it);
+    const st = statusMeta(await getStatus(env, aid));
+    if (!showAll && st.key === "done") { hidden++; continue; } // sembunyikan yang distributed
     const prog = await getProg(env, aid);
     const done = accts.filter((a) => prog[a]).length;
-    const st = statusMeta(await getStatus(env, aid));
     rows.push([{ text: `${st.emoji} ${aidLabel(it)} (${done}/${accts.length})`, callback_data: `bd:${aid}` }]);
   }
+  if (!rows.length) return sendMessage(env, chatId, "Belum ada airdrop aktif. Tandai lewat /addairdrop." + (hidden ? `\n(${hidden} sudah distributed — /board all)` : ""));
+  if (hidden) rows.push([{ text: `👁 Tampilkan ${hidden} selesai`, callback_data: "board:all" }]);
+  else if (showAll) rows.push([{ text: "🙈 Sembunyikan selesai", callback_data: "board" }]);
   rows.push([{ text: "👛 Kelola akun", callback_data: "acctlist" }]);
   return sendMessage(env, chatId, `📊 <b>PAPAN PROGRES AIRDROP</b>\n${accts.length} akun · tap airdrop buat atur:\n🟢 ongoing · 📸 snapshot · 🚀 TGE · 💰 distributed`, { parse_mode: "HTML", reply_markup: { inline_keyboard: rows } });
 }
@@ -1587,7 +1693,13 @@ async function sendBoardAirdrop(env, chatId, aid, cq) {
   rows.push([{ text: "🔙 Semua airdrop", callback_data: "board" }]);
   const done = accts.filter((a) => prog[a]).length;
   const sm = statusMeta(curStatus);
-  const body = `📊 <b>${htmlEsc(label)}</b>  ${sm.emoji} ${sm.label}\n${done}/${accts.length} akun sudah garap.\nTap akun buat toggle · atur status di bawah:`;
+  const cost = await getCost(env, aid);
+  const note = await getNote(env, aid);
+  const extra = [
+    cost ? `💸 Modal: $${cost}` : "",
+    note ? `📝 ${htmlEsc(note)}` : "",
+  ].filter(Boolean).join("\n");
+  const body = `📊 <b>${htmlEsc(label)}</b>  ${sm.emoji} ${sm.label}\n${done}/${accts.length} akun sudah garap.${extra ? "\n" + extra : ""}\nTap akun buat toggle · atur status di bawah:`;
   const markup = { inline_keyboard: rows };
   if (cq && cq.message) {
     return tg(env, "editMessageText", { chat_id: chatId, message_id: cq.message.message_id, text: body, parse_mode: "HTML", reply_markup: markup });
@@ -1735,8 +1847,10 @@ function helpText() {
     "/gas — biaya gas Ethereum · /fgi — Fear & Greed Index",
     "/airdrops — daftar airdrop aktif (+ countdown deadline)",
     "/calendar — airdrop diurut dari deadline terdekat + progress garap",
-    "/board — papan progres airdrop × akun (centang per akun)",
+    "/board — papan progres airdrop × akun (+ status & modal)",
     "/akun — kelola daftar akun/wallet kamu (add/del)",
+    "/stats — ringkasan semua airdrop · /roi — rekap modal",
+    "/modal <nama> | <$> — catat modal · /note <nama> | <cara>",
     "",
     "💼 Simpan wallet: DM bot ini → /wallet <alamat>",
   ].join("\n");
