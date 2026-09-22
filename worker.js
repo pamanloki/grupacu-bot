@@ -914,42 +914,60 @@ async function usdIdr(env) {
 
 const STABLE = { usdt: 1, usdc: 1, dai: 1, fdusd: 1, tusd: 1, busd: 1 };
 
-// Ambil quote sebuah coin: { usd, idr, chg }. Rantai sumber biar tahan limit:
-// CryptoCompare -> Binance -> CoinGecko. Cache 60 detik per symbol.
-async function quote(env, sym, cgId) {
+// Sumber harga (masing-masing catat status ke dbg untuk diagnosa).
+async function srcCC(U, rate, dbg) {
+  try {
+    const res = await fetch(`https://min-api.cryptocompare.com/data/pricemultifull?fsyms=${encodeURIComponent(U)}&tsyms=USD,IDR`);
+    if (!res.ok) { dbg && dbg.push(`CC:${res.status}`); return null; }
+    const r = await res.json();
+    const raw = r && r.RAW && r.RAW[U];
+    if (raw && raw.USD && raw.USD.PRICE) return { usd: raw.USD.PRICE, chg: raw.USD.CHANGEPCT24HOUR, idr: (raw.IDR && raw.IDR.PRICE) || raw.USD.PRICE * rate };
+    dbg && dbg.push("CC:nodata"); return null;
+  } catch (e) { dbg && dbg.push("CC:err"); return null; }
+}
+async function srcIndodax(sym, rate, dbg) {
+  try {
+    const res = await fetch(`https://indodax.com/api/ticker/${sym}idr`);
+    if (!res.ok) { dbg && dbg.push(`IDX:${res.status}`); return null; }
+    const r = await res.json();
+    const last = r && r.ticker && +r.ticker.last;
+    if (last) return { usd: last / rate, chg: null, idr: last };
+    dbg && dbg.push("IDX:nodata"); return null;
+  } catch (e) { dbg && dbg.push("IDX:err"); return null; }
+}
+async function srcBinance(U, rate, dbg) {
+  try {
+    const res = await fetch(`https://api.binance.com/api/v3/ticker/24hr?symbol=${U}USDT`);
+    if (!res.ok) { dbg && dbg.push(`BN:${res.status}`); return null; }
+    const r = await res.json();
+    if (r && r.lastPrice) { const usd = +r.lastPrice; return { usd, chg: +r.priceChangePercent, idr: usd * rate }; }
+    dbg && dbg.push("BN:nodata"); return null;
+  } catch (e) { dbg && dbg.push("BN:err"); return null; }
+}
+async function srcCG(cgId, rate, dbg) {
+  try {
+    const res = await fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${cgId}&vs_currencies=usd,idr&include_24hr_change=true`, { headers: { accept: "application/json" } });
+    if (!res.ok) { dbg && dbg.push(`CG:${res.status}`); return null; }
+    const r = await res.json();
+    const d = r && r[cgId];
+    if (d && d.usd != null) return { usd: d.usd, chg: d.usd_24h_change, idr: d.idr != null ? d.idr : d.usd * rate };
+    dbg && dbg.push("CG:nodata"); return null;
+  } catch (e) { dbg && dbg.push("CG:err"); return null; }
+}
+
+// Rantai sumber: CryptoCompare -> Indodax (ID) -> Binance -> CoinGecko.
+async function quote(env, sym, cgId, dbg) {
   sym = (sym || "").toLowerCase();
   const cached = await env.GRUPACU.get(`q:${sym}`);
   if (cached) { try { return JSON.parse(cached); } catch { /* refetch */ } }
   const rate = await usdIdr(env);
   let q = null;
   if (STABLE[sym] != null) q = { usd: STABLE[sym], chg: 0, idr: STABLE[sym] * rate };
-
-  // 1) CryptoCompare — pakai symbol langsung, kasih USD+IDR+change, andal dari Worker.
-  if (!q) {
-    try {
-      const U = sym.toUpperCase();
-      const r = await fetch(`https://min-api.cryptocompare.com/data/pricemultifull?fsyms=${encodeURIComponent(U)}&tsyms=USD,IDR`).then((x) => x.json());
-      const raw = r && r.RAW && r.RAW[U];
-      if (raw && raw.USD && raw.USD.PRICE) {
-        q = { usd: raw.USD.PRICE, chg: raw.USD.CHANGEPCT24HOUR, idr: (raw.IDR && raw.IDR.PRICE) || raw.USD.PRICE * rate };
-      }
-    } catch { /* lanjut */ }
-  }
-  // 2) Binance
-  if (!q) {
-    try {
-      const r = await fetch(`https://api.binance.com/api/v3/ticker/24hr?symbol=${sym.toUpperCase()}USDT`).then((x) => x.json());
-      if (r && r.lastPrice) { const usd = +r.lastPrice; q = { usd, chg: +r.priceChangePercent, idr: usd * rate }; }
-    } catch { /* lanjut */ }
-  }
-  // 3) CoinGecko
-  if (!q && cgId) {
-    try {
-      const r = await fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${cgId}&vs_currencies=usd,idr&include_24hr_change=true`, { headers: { accept: "application/json" } }).then((x) => x.json());
-      const d = r && r[cgId];
-      if (d && d.usd != null) q = { usd: d.usd, chg: d.usd_24h_change, idr: d.idr != null ? d.idr : d.usd * rate };
-    } catch { /* abaikan */ }
-  }
+  const U = sym.toUpperCase();
+  if (!q) q = await srcCC(U, rate, dbg);
+  if (!q) q = await srcIndodax(sym, rate, dbg);
+  if (!q) q = await srcBinance(U, rate, dbg);
+  if (!q && cgId) q = await srcCG(cgId, rate, dbg);
   if (q) await env.GRUPACU.put(`q:${sym}`, JSON.stringify(q), { expirationTtl: 60 });
   return q;
 }
@@ -972,12 +990,14 @@ function priceLine(sym, q) {
 async function sendPrice(env, chatId, arg) {
   const syms = [...new Set((arg || "btc").split(/\s+/).filter(Boolean).map((s) => s.toLowerCase()))].slice(0, 10);
   const lines = [];
+  const dbg = [];
   for (const sl of syms) {
     const cgId = await resolveCoinSearch(env, sl);
-    const q = await quote(env, sl, cgId);
-    lines.push(q ? priceLine(sl, q) : `❓ ${sl.toUpperCase()} tak ditemukan`);
+    const q = await quote(env, sl, cgId, dbg);
+    lines.push(q ? priceLine(sl, q) : `❓ ${sl.toUpperCase()} tak terbaca`);
   }
-  return sendMessage(env, chatId, lines.join("\n") || "Gagal ambil harga, coba lagi.", { parse_mode: "HTML" });
+  const body = lines.join("\n") + (dbg.length ? `\n\n<code>${htmlEsc(dbg.join(" · "))}</code>` : "");
+  return sendMessage(env, chatId, body || "Gagal ambil harga, coba lagi.", { parse_mode: "HTML" });
 }
 
 // Diagnosa: cek tiap sumber harga, tampilkan HTTP status + cuplikan.
@@ -999,10 +1019,12 @@ async function sendPriceDebug(env, chatId, sym) {
 }
 
 async function sendConvert(env, chatId, amount, sym, id) {
-  const q = await quote(env, sym, id);
-  if (!q) return sendMessage(env, chatId, "Gagal ambil harga, coba lagi.");
+  const dbg = [];
+  const q = await quote(env, sym, id, dbg);
+  if (!q) return sendMessage(env, chatId, `Gagal ambil harga ${sym.toUpperCase()}.\n<code>${htmlEsc(dbg.join(" · ") || "no source")}</code>`, { parse_mode: "HTML" });
+  const chg = q.chg == null ? "" : changeStr(q.chg);
   return sendMessage(env, chatId,
-    `💱 <b>${amount} ${sym.toUpperCase()}</b> ≈\n   $${fmtUsd(amount * q.usd)}\n   Rp ${fmtIdr(amount * q.idr)}\n\n1 ${sym.toUpperCase()} = $${fmtUsd(q.usd)} ${changeStr(q.chg)}`,
+    `💱 <b>${amount} ${sym.toUpperCase()}</b> ≈\n   $${fmtUsd(amount * q.usd)}\n   Rp ${fmtIdr(amount * q.idr)}\n\n1 ${sym.toUpperCase()} = $${fmtUsd(q.usd)} ${chg}`,
     { parse_mode: "HTML" });
 }
 
