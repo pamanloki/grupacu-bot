@@ -25,7 +25,7 @@ const DEFAULT_REACT_EMOJI = ["👍", "✅", "✔️", "🔥"];
 
 export default {
   async scheduled(event, env, ctx) {
-    ctx.waitUntil((async () => { await runDeadlines(env); await runDigest(env); await runAlerts(env); await runGasAlert(env); await runReminders(env); })());
+    ctx.waitUntil((async () => { await runDeadlines(env); await runDigest(env); await runAlerts(env); await runGasAlert(env); await runReminders(env); await runWatch(env); })());
   },
   async fetch(request, env) {
     if (request.method !== "POST") {
@@ -275,6 +275,9 @@ async function onGroupCommand(env, chat, from, text, msg) {
   if (cmd === "/remind" || cmd === "/ingatkan") return handleRemind(env, chatId, from, arg);
   if (cmd === "/reminders" || cmd === "/ingat") return listReminders(env, chatId, from);
   if (cmd === "/delremind") return delReminder(env, chatId, from, arg);
+  if (cmd === "/watch") return handleWatch(env, chatId, arg);
+  if (cmd === "/watches" || cmd === "/watchlist") return listWatches(env, chatId);
+  if (cmd === "/unwatch") return unwatch(env, chatId, arg);
   if (cmd === "/akun" || cmd === "/akunku" || cmd === "/accounts") return handleAccounts(env, chatId, arg);
   if (cmd === "/alert") return addAlert(env, chatId, from, arg);
   if (cmd === "/alerts") return listAlerts(env, chatId, from);
@@ -363,6 +366,9 @@ async function onPrivate(env, chatId, from, text, msg) {
   if (cmd === "/remind" || cmd === "/ingatkan") return handleRemind(env, chatId, from, arg);
   if (cmd === "/reminders" || cmd === "/ingat") return listReminders(env, chatId, from);
   if (cmd === "/delremind") return delReminder(env, chatId, from, arg);
+  if (cmd === "/watch") return handleWatch(env, chatId, arg);
+  if (cmd === "/watches" || cmd === "/watchlist") return listWatches(env, chatId);
+  if (cmd === "/unwatch") return unwatch(env, chatId, arg);
   if (cmd === "/akun" || cmd === "/akunku" || cmd === "/accounts") return handleAccounts(env, chatId, arg);
   if (cmd === "/alert") return addAlert(env, chatId, from, arg);
   if (cmd === "/alerts") return listAlerts(env, chatId, from);
@@ -1817,6 +1823,82 @@ async function handleAccounts(env, chatId, arg) {
   return sendMessage(env, chatId, lines.join("\n"), { parse_mode: "HTML", reply_markup: { inline_keyboard: rows } });
 }
 
+// ---------------------------------------------------------------------------
+// Wallet tracker (polling via cron, tanpa API key)
+// Solana: RPC publik getSignaturesForAddress · Ethereum: Blockscout txlist.
+// Bukan real-time — dicek tiap kali cron jalan (mis. tiap jam).
+// ---------------------------------------------------------------------------
+function shortAddr(a) { return a.length > 12 ? `${a.slice(0, 6)}…${a.slice(-4)}` : a; }
+function detectChain(addr) {
+  if (/^0x[0-9a-fA-F]{40}$/.test(addr)) return "eth";
+  if (/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(addr)) return "sol";
+  return null;
+}
+async function latestTx(chain, addr) {
+  try {
+    if (chain === "sol") {
+      const r = await fetchT("https://api.mainnet-beta.solana.com", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getSignaturesForAddress", params: [addr, { limit: 1 }] }) }, 7000);
+      const j = await r.json();
+      const sig = j && j.result && j.result[0] && j.result[0].signature;
+      return sig ? { id: sig, url: `https://solscan.io/tx/${sig}` } : null;
+    }
+    const r = await fetchT(`https://eth.blockscout.com/api?module=account&action=txlist&address=${addr}&sort=desc&page=1&offset=1`, {}, 7000);
+    const j = await r.json();
+    const tx = j && Array.isArray(j.result) && j.result[0];
+    return tx ? { id: tx.hash, url: `https://etherscan.io/tx/${tx.hash}` } : null;
+  } catch { return null; }
+}
+async function handleWatch(env, chatId, arg) {
+  const parts = (arg || "").split(/\s+/).filter(Boolean);
+  const addr = parts.shift();
+  if (!addr) return sendMessage(env, chatId, "Cara: <code>/watch &lt;alamat&gt; [label]</code>\nmis: <code>/watch 0xabc...123 dompet utama</code>\n(dukung EVM 0x… &amp; Solana)", { parse_mode: "HTML" });
+  const chain = detectChain(addr);
+  if (!chain) return sendMessage(env, chatId, "Alamat tak dikenali. Dukung EVM (0x…) & Solana.");
+  const label = parts.join(" ").slice(0, 30);
+  const t = await latestTx(chain, addr); // set baseline biar tx lama tak dinotif
+  await env.GRUPACU.put(`watch:${Date.now()}`, JSON.stringify({ addr, chain, label, chatId, last: t ? t.id : null }));
+  return sendMessage(env, chatId, `👀 Melacak ${chain.toUpperCase()} <code>${shortAddr(addr)}</code>${label ? ` (${htmlEsc(label)})` : ""}\nNotif tiap ada tx baru (dicek berkala via cron, bukan real-time).`, { parse_mode: "HTML" });
+}
+async function loadWatches(env) {
+  const arr = [];
+  let cursor;
+  do {
+    const res = await env.GRUPACU.list({ prefix: "watch:", cursor, limit: 1000 });
+    for (const k of res.keys) { const raw = await env.GRUPACU.get(k.name); if (raw) { try { arr.push({ key: k.name, ...JSON.parse(raw) }); } catch { /* skip */ } } }
+    cursor = res.list_complete ? null : res.cursor;
+  } while (cursor);
+  arr.sort((a, b) => Number(a.key.slice(6)) - Number(b.key.slice(6)));
+  return arr;
+}
+async function listWatches(env, chatId) {
+  const arr = await loadWatches(env);
+  if (!arr.length) return sendMessage(env, chatId, "Belum ada wallet dilacak. Tambah: /watch <alamat> [label]");
+  const lines = ["👀 <b>WALLET DILACAK</b>", ""];
+  arr.forEach((w, i) => lines.push(`${i + 1}. ${w.chain.toUpperCase()} <code>${shortAddr(w.addr)}</code>${w.label ? ` — ${htmlEsc(w.label)}` : ""}`));
+  lines.push("", "Hapus: /unwatch <no>");
+  return sendMessage(env, chatId, lines.join("\n"), { parse_mode: "HTML" });
+}
+async function unwatch(env, chatId, arg) {
+  const arr = await loadWatches(env);
+  const n = parseInt(arg, 10);
+  if (!n || n < 1 || n > arr.length) return sendMessage(env, chatId, "Nomor tak valid. Lihat /watches.");
+  await env.GRUPACU.delete(arr[n - 1].key);
+  return sendMessage(env, chatId, `🗑️ Berhenti melacak ${shortAddr(arr[n - 1].addr)}.`);
+}
+async function runWatch(env) {
+  const arr = await loadWatches(env);
+  for (const w of arr) {
+    if (!w.addr) continue;
+    const t = await latestTx(w.chain, w.addr);
+    if (!t) continue;
+    if (w.last && w.last !== t.id) {
+      const to = w.chatId || (await getConfig(env)).groupId;
+      if (to) await sendMessage(env, to, `🔔 <b>Aktivitas wallet</b>${w.label ? ` — ${htmlEsc(w.label)}` : ""}\n${w.chain.toUpperCase()} <code>${shortAddr(w.addr)}</code>\nTx baru: ${t.url}`, { parse_mode: "HTML" });
+    }
+    if (w.last !== t.id) { w.last = t.id; await env.GRUPACU.put(w.key, JSON.stringify({ addr: w.addr, chain: w.chain, label: w.label, chatId: w.chatId, last: t.id })); }
+  }
+}
+
 // /board — daftar airdrop aktif + berapa akun yang sudah garap; tap buat centang.
 // showAll=true ikut tampilkan yang sudah 💰 distributed.
 async function sendBoard(env, chatId, showAll) {
@@ -2019,6 +2101,7 @@ function helpText() {
     "/modal <nama> | <$> · /target <nama> | <$> · /note <nama> | <cara>",
     "/gasalert <gwei> — colek kalau gas murah",
     "/remind <durasi> <pesan> · /reminders · /delremind <no>",
+    "/watch <alamat> [label] — lacak tx wallet · /watches · /unwatch <no>",
     "",
     "💼 Simpan wallet: DM bot ini → /wallet <alamat>",
   ].join("\n");

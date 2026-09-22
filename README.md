@@ -66,7 +66,12 @@ distributed otomatis disembunyikan (`/board all` untuk tampilkan).
   `/reminders` · `/delremind <no>` (butuh Cron).
 
 Data di KV: `accts`, `ap:<aid>`, `stt:<aid>` (status), `cost:<aid>`, `tgt:<aid>`,
-`nx:<aid>` (catatan), `rem:<due>:<uid>` (reminder). Gas-alert di `cfg`.
+`nx:<aid>` (catatan), `rem:<due>:<uid>` (reminder), `watch:<ts>` (wallet). Gas-alert di `cfg`.
+
+**Wallet tracker** (tanpa API key): `/watch <alamat> [label]` lacak tx wallet
+(EVM 0x… via Blockscout, Solana via RPC publik). `/watches` daftar · `/unwatch <no>`.
+Notif tiap ada tx baru — **berkala** (dicek tiap cron jalan), bukan real-time.
+Buat real-time perlu webhook (Helius/Alchemy) + API key.
 
 **Admin:** `/bind` `/setup` `/markers` `/announce on|off` `/digest on|off`
 `/addairdrop` `/deadline 12h` `/nudge` `/members` `/wallets` `/refboard`
