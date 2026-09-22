@@ -250,6 +250,7 @@ async function onGroupCommand(env, chat, from, text, msg) {
   if (cmd === "/me" || cmd === "/statku") return sendMe(env, chatId, from);
   if (cmd === "/ref") return sendRef(env, chatId, from, chat);
   if (cmd === "/p" || cmd === "/price" || cmd === "/harga") return sendPrice(env, chatId, arg || "btc");
+  if (cmd === "/pdebug") return sendPriceDebug(env, chatId, arg || "btc");
   if (cmd === "/alert") return addAlert(env, chatId, from, arg);
   if (cmd === "/alerts") return listAlerts(env, chatId, from);
   if (cmd === "/delalert" || cmd === "/hapusalert") return delAlert(env, chatId, from, arg);
@@ -257,7 +258,6 @@ async function onGroupCommand(env, chat, from, text, msg) {
   // Admin only
   if (!isAdmin(env, from.id)) return;
   if (cmd === "/bind") return bindGroup(env, chat);
-  if (cmd === "/pdebug") return sendPriceDebug(env, chatId, arg || "btc");
   if (cmd === "/setup") return sendMessage(env, chatId, setupText(env));
   if (cmd === "/markers") return handleMarkers(env, chatId, arg);
   if (cmd === "/wallets") return exportWallets(env, chatId);
