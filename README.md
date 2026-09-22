@@ -70,8 +70,12 @@ Data di KV: `accts`, `ap:<aid>`, `stt:<aid>` (status), `cost:<aid>`, `tgt:<aid>`
 
 **Wallet tracker** (tanpa API key): `/watch <alamat> [label]` lacak tx wallet
 (EVM 0x… via Blockscout, Solana via RPC publik). `/watches` daftar · `/unwatch <no>`.
-Notif tiap ada tx baru — **berkala** (dicek tiap cron jalan), bukan real-time.
-Buat real-time perlu webhook (Helius/Alchemy) + API key.
+Notif tiap ada tx baru — **berkala** (dicek tiap cron jalan).
+
+**Real-time (instan)** lewat webhook, tanpa secret baru di worker: `/hookurl`
+kasih URL untuk ditempel di dashboard **Helius** (Solana) / **Alchemy** (EVM).
+Worker menerima POST di `?wh=helius|alchemy&t=<TELEGRAM_SECRET>` lalu langsung
+notif. Dedup pakai `hsig:<sig>` (TTL 1 jam).
 
 **Admin:** `/bind` `/setup` `/markers` `/announce on|off` `/digest on|off`
 `/addairdrop` `/deadline 12h` `/nudge` `/members` `/wallets` `/refboard`

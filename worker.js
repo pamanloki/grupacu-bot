@@ -28,6 +28,18 @@ export default {
     ctx.waitUntil((async () => { await runDeadlines(env); await runDigest(env); await runAlerts(env); await runGasAlert(env); await runReminders(env); await runWatch(env); })());
   },
   async fetch(request, env) {
+    const url = new URL(request.url);
+    // Webhook provider wallet-tracker real-time (Helius/Alchemy) -> ?wh=...
+    const wh = url.searchParams.get("wh");
+    if (request.method === "POST" && wh) {
+      if (env.TELEGRAM_SECRET && url.searchParams.get("t") !== env.TELEGRAM_SECRET) return new Response("forbidden", { status: 403 });
+      let body; try { body = await request.json(); } catch { return new Response("bad", { status: 400 }); }
+      try {
+        if (wh === "helius") await handleHeliusHook(env, body);
+        else if (wh === "alchemy") await handleAlchemyHook(env, body);
+      } catch (e) { console.log("wherr", e && e.message); }
+      return new Response("ok");
+    }
     if (request.method !== "POST") {
       return new Response("grupacu-bot aktif.", { headers: { "content-type": "text/plain; charset=utf-8" } });
     }
@@ -35,6 +47,8 @@ export default {
       const got = request.headers.get("x-telegram-bot-api-secret-token");
       if (got !== env.TELEGRAM_SECRET) return new Response("forbidden", { status: 403 });
     }
+    // Simpan origin worker sekali (buat bikin URL webhook di /hookurl).
+    if (!SELF_ORIGIN) { SELF_ORIGIN = url.origin; env.GRUPACU.put("selfurl", url.origin).catch(() => {}); }
     let update;
     try { update = await request.json(); } catch { return new Response("bad", { status: 400 }); }
     try {
@@ -46,6 +60,8 @@ export default {
     return new Response("ok");
   },
 };
+
+let SELF_ORIGIN = null; // origin worker (di-cache per isolate) buat URL webhook
 
 // ---------------------------------------------------------------------------
 // Router update
@@ -278,6 +294,7 @@ async function onGroupCommand(env, chat, from, text, msg) {
   if (cmd === "/watch") return handleWatch(env, chatId, arg);
   if (cmd === "/watches" || cmd === "/watchlist") return listWatches(env, chatId);
   if (cmd === "/unwatch") return unwatch(env, chatId, arg);
+  if (cmd === "/hookurl" || cmd === "/realtime") return sendHookUrl(env, chatId);
   if (cmd === "/akun" || cmd === "/akunku" || cmd === "/accounts") return handleAccounts(env, chatId, arg);
   if (cmd === "/alert") return addAlert(env, chatId, from, arg);
   if (cmd === "/alerts") return listAlerts(env, chatId, from);
@@ -369,6 +386,7 @@ async function onPrivate(env, chatId, from, text, msg) {
   if (cmd === "/watch") return handleWatch(env, chatId, arg);
   if (cmd === "/watches" || cmd === "/watchlist") return listWatches(env, chatId);
   if (cmd === "/unwatch") return unwatch(env, chatId, arg);
+  if (cmd === "/hookurl" || cmd === "/realtime") return sendHookUrl(env, chatId);
   if (cmd === "/akun" || cmd === "/akunku" || cmd === "/accounts") return handleAccounts(env, chatId, arg);
   if (cmd === "/alert") return addAlert(env, chatId, from, arg);
   if (cmd === "/alerts") return listAlerts(env, chatId, from);
@@ -1857,7 +1875,7 @@ async function handleWatch(env, chatId, arg) {
   const label = parts.join(" ").slice(0, 30);
   const t = await latestTx(chain, addr); // set baseline biar tx lama tak dinotif
   await env.GRUPACU.put(`watch:${Date.now()}`, JSON.stringify({ addr, chain, label, chatId, last: t ? t.id : null }));
-  return sendMessage(env, chatId, `👀 Melacak ${chain.toUpperCase()} <code>${shortAddr(addr)}</code>${label ? ` (${htmlEsc(label)})` : ""}\nNotif tiap ada tx baru (dicek berkala via cron, bukan real-time).`, { parse_mode: "HTML" });
+  return sendMessage(env, chatId, `👀 Melacak ${chain.toUpperCase()} <code>${shortAddr(addr)}</code>${label ? ` (${htmlEsc(label)})` : ""}\nNotif tiap ada tx baru (berkala via cron).\nMau real-time (instan)? Ketik /hookurl.`, { parse_mode: "HTML" });
 }
 async function loadWatches(env) {
   const arr = [];
@@ -1897,6 +1915,73 @@ async function runWatch(env) {
     }
     if (w.last !== t.id) { w.last = t.id; await env.GRUPACU.put(w.key, JSON.stringify({ addr: w.addr, chain: w.chain, label: w.label, chatId: w.chatId, last: t.id })); }
   }
+}
+
+// --- Real-time via webhook provider (Helius/Alchemy) ---
+// Cocokkan alamat di payload dengan daftar /watch (buat label & tujuan notif).
+async function matchWatch(env, addrs, chain) {
+  const low = addrs.filter(Boolean).map((a) => String(a).toLowerCase());
+  const arr = await loadWatches(env);
+  return arr.find((w) => w.chain === chain && low.includes(String(w.addr).toLowerCase())) || null;
+}
+async function alreadyNotified(env, id) {
+  if (await env.GRUPACU.get(`hsig:${id}`)) return true;
+  await env.GRUPACU.put(`hsig:${id}`, "1", { expirationTtl: 3600 });
+  return false;
+}
+// Helius mengirim ARRAY enhanced-transaction.
+async function handleHeliusHook(env, body) {
+  const arr = Array.isArray(body) ? body : (body ? [body] : []);
+  for (const tx of arr) {
+    const sig = tx.signature || (tx.transaction && tx.transaction.signatures && tx.transaction.signatures[0]);
+    if (!sig || await alreadyNotified(env, sig)) continue;
+    const addrs = new Set();
+    if (tx.feePayer) addrs.add(tx.feePayer);
+    (tx.accountData || []).forEach((a) => a.account && addrs.add(a.account));
+    (tx.nativeTransfers || []).forEach((t) => { t.fromUserAccount && addrs.add(t.fromUserAccount); t.toUserAccount && addrs.add(t.toUserAccount); });
+    (tx.tokenTransfers || []).forEach((t) => { t.fromUserAccount && addrs.add(t.fromUserAccount); t.toUserAccount && addrs.add(t.toUserAccount); });
+    const w = await matchWatch(env, [...addrs], "sol");
+    const to = (w && w.chatId) || (await getConfig(env)).groupId;
+    if (!to) continue;
+    const desc = tx.description || tx.type || "transaksi";
+    await sendMessage(env, to, `🔔 <b>Wallet aktif</b>${w && w.label ? ` — ${htmlEsc(w.label)}` : ""} (SOL)\n${htmlEsc(String(desc).slice(0, 200))}\nhttps://solscan.io/tx/${sig}`, { parse_mode: "HTML" });
+  }
+}
+// Alchemy Address Activity: { event: { activity: [ { fromAddress, toAddress, hash, value, asset } ] } }
+async function handleAlchemyHook(env, body) {
+  const acts = (body && body.event && body.event.activity) || [];
+  for (const a of acts) {
+    const hash = a.hash;
+    if (!hash || await alreadyNotified(env, hash)) continue;
+    const w = await matchWatch(env, [a.fromAddress, a.toAddress], "eth");
+    const to = (w && w.chatId) || (await getConfig(env)).groupId;
+    if (!to) continue;
+    const val = a.value != null ? `${a.value} ${a.asset || ""}`.trim() : "";
+    await sendMessage(env, to, `🔔 <b>Wallet aktif</b>${w && w.label ? ` — ${htmlEsc(w.label)}` : ""} (EVM)\n${val ? htmlEsc(val) + "\n" : ""}https://etherscan.io/tx/${hash}`, { parse_mode: "HTML" });
+  }
+}
+// /hookurl — tampilkan URL webhook buat ditempel di dashboard Helius/Alchemy.
+async function sendHookUrl(env, chatId) {
+  const origin = SELF_ORIGIN || (await env.GRUPACU.get("selfurl"));
+  if (!origin) return sendMessage(env, chatId, "URL worker belum kebaca. Kirim pesan apa pun ke bot dulu, lalu /hookurl lagi.");
+  const t = env.TELEGRAM_SECRET ? `&t=${encodeURIComponent(env.TELEGRAM_SECRET)}` : "";
+  return sendMessage(env, chatId, [
+    "🔗 <b>SETUP WALLET TRACKER REAL-TIME</b>",
+    "",
+    "🟣 <b>Solana — Helius</b> (helius.dev, gratis):",
+    "Dashboard → Webhooks → Create Webhook:",
+    `• URL: <code>${origin}/?wh=helius${t}</code>`,
+    "• Type: Enhanced · Transaction: Any",
+    "• Account Addresses: alamat Solana kamu",
+    "",
+    "🔵 <b>EVM — Alchemy</b> (alchemy.com, gratis):",
+    "Dashboard → Notify → Address Activity → Create:",
+    `• Webhook URL: <code>${origin}/?wh=alchemy${t}</code>`,
+    "• Network: ETH/Base/dll · isi alamat 0x kamu",
+    "",
+    "Sudah? Tiap tx wallet langsung dinotif ke sini (real-time).",
+    "Biar dapat label, /watch alamat yang sama juga.",
+  ].join("\n"), { parse_mode: "HTML" });
 }
 
 // /board — daftar airdrop aktif + berapa akun yang sudah garap; tap buat centang.
@@ -2102,6 +2187,7 @@ function helpText() {
     "/gasalert <gwei> — colek kalau gas murah",
     "/remind <durasi> <pesan> · /reminders · /delremind <no>",
     "/watch <alamat> [label] — lacak tx wallet · /watches · /unwatch <no>",
+    "/hookurl — setup wallet tracker REAL-TIME (Helius/Alchemy)",
     "",
     "💼 Simpan wallet: DM bot ini → /wallet <alamat>",
   ].join("\n");
