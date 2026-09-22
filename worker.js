@@ -251,6 +251,8 @@ async function onGroupCommand(env, chat, from, text, msg) {
   if (cmd === "/ref") return sendRef(env, chatId, from, chat);
   if (cmd === "/p" || cmd === "/price" || cmd === "/harga") return sendPrice(env, chatId, arg || "btc");
   if (cmd === "/pdebug") return sendPriceDebug(env, chatId, arg || "btc");
+  if (cmd === "/gas") return sendGas(env, chatId);
+  if (cmd === "/airdrops" || cmd === "/airdrop") return listAirdrops(env, chatId);
   if (cmd === "/alert") return addAlert(env, chatId, from, arg);
   if (cmd === "/alerts") return listAlerts(env, chatId, from);
   if (cmd === "/delalert" || cmd === "/hapusalert") return delAlert(env, chatId, from, arg);
@@ -258,6 +260,8 @@ async function onGroupCommand(env, chat, from, text, msg) {
   // Admin only
   if (!isAdmin(env, from.id)) return;
   if (cmd === "/bind") return bindGroup(env, chat);
+  if (cmd === "/addairdrop") return addAirdrop(env, chatId, arg);
+  if (cmd === "/delairdrop") return delAirdrop(env, chatId, arg);
   if (cmd === "/setup") return sendMessage(env, chatId, setupText(env));
   if (cmd === "/markers") return handleMarkers(env, chatId, arg);
   if (cmd === "/wallets") return exportWallets(env, chatId);
@@ -314,6 +318,8 @@ async function onPrivate(env, chatId, from, text, msg) {
   if (cmd === "/leaderboard" || cmd === "/lb") return sendLeaderboard(env, chatId, "all");
   if (cmd === "/task" || cmd === "/tasks" || cmd === "/posts") return sendTasksList(env, chatId);
   if (cmd === "/p" || cmd === "/price" || cmd === "/harga") return sendPrice(env, chatId, arg || "btc");
+  if (cmd === "/gas") return sendGas(env, chatId);
+  if (cmd === "/airdrops" || cmd === "/airdrop") return listAirdrops(env, chatId);
   if (cmd === "/alert") return addAlert(env, chatId, from, arg);
   if (cmd === "/alerts") return listAlerts(env, chatId, from);
   if (cmd === "/delalert" || cmd === "/hapusalert") return delAlert(env, chatId, from, arg);
@@ -330,6 +336,8 @@ async function onPrivate(env, chatId, from, text, msg) {
     if (cmd === "/refboard") return sendRefBoard(env, chatId);
     if (cmd === "/setup") return sendMessage(env, chatId, setupText(env));
     if (cmd === "/pdebug") return sendPriceDebug(env, chatId, arg || "btc");
+    if (cmd === "/addairdrop") return addAirdrop(env, chatId, arg);
+    if (cmd === "/delairdrop") return delAirdrop(env, chatId, arg);
   }
 
   // Bukan perintah -> anggap submit wallet kalau bentuknya alamat.
@@ -1093,6 +1101,83 @@ function fmtAmt(n) {
   return String(n);
 }
 
+// ---------------------------------------------------------------------------
+// Gas Ethereum (⛽)
+// ---------------------------------------------------------------------------
+
+function fmtGwei(n) { return n >= 10 ? String(Math.round(n)) : n.toFixed(2); }
+async function ethGasGwei() {
+  const rpcs = ["https://ethereum-rpc.publicnode.com", "https://cloudflare-eth.com", "https://rpc.ankr.com/eth"];
+  for (const url of rpcs) {
+    try {
+      const res = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", method: "eth_gasPrice", params: [], id: 1 }) });
+      const r = await res.json();
+      if (r && r.result) { const g = parseInt(r.result, 16) / 1e9; if (g > 0) return g; }
+    } catch { /* coba rpc berikutnya */ }
+  }
+  return null;
+}
+async function sendGas(env, chatId) {
+  const cached = await env.GRUPACU.get("gasgwei");
+  let gwei = cached ? +cached : await ethGasGwei();
+  if (gwei == null) return sendMessage(env, chatId, "Gagal ambil data gas, coba lagi.");
+  if (!cached) await env.GRUPACU.put("gasgwei", String(gwei), { expirationTtl: 30 });
+  const eth = await quote(env, "eth", "ethereum");
+  const ethUsd = eth ? eth.usd : 0;
+  const cost = (gas) => ethUsd ? "$" + fmtUsd(gas * gwei * 1e-9 * ethUsd) : "-";
+  const slow = gwei * 0.9, fast = gwei * 1.3;
+  return sendMessage(env, chatId, [
+    "⛽ <b>Gas Ethereum</b>",
+    "➖➖➖➖➖➖➖",
+    `🟢 Rendah : <b>${fmtGwei(slow)} gwei</b>`,
+    `🟡 Normal : <b>${fmtGwei(gwei)} gwei</b>`,
+    `🔴 Cepat  : <b>${fmtGwei(fast)} gwei</b>`,
+    "",
+    `<i>Estimasi @normal: transfer ${cost(21000)} · swap ${cost(150000)}</i>`,
+  ].join("\n"), { parse_mode: "HTML" });
+}
+
+// ---------------------------------------------------------------------------
+// Daftar airdrop aktif (🗓️)
+// ---------------------------------------------------------------------------
+
+async function loadAirdrops(env) {
+  const arr = [];
+  let cursor;
+  do {
+    const res = await env.GRUPACU.list({ prefix: "air:", cursor, limit: 1000 });
+    for (const k of res.keys) { const raw = await env.GRUPACU.get(k.name); if (raw) { try { arr.push({ key: k.name, ...JSON.parse(raw) }); } catch { /* skip */ } } }
+    cursor = res.list_complete ? null : res.cursor;
+  } while (cursor);
+  arr.sort((a, b) => b.ts - a.ts); // terbaru dulu
+  return arr;
+}
+async function listAirdrops(env, chatId) {
+  const arr = await loadAirdrops(env);
+  if (!arr.length) return sendMessage(env, chatId, "🗓️ Belum ada airdrop terdaftar.\nAdmin bisa menambah: /addairdrop Nama | https://link | catatan");
+  const lines = ["🗓️ <b>AIRDROP AKTIF</b>", ""];
+  arr.forEach((a, i) => {
+    lines.push(`${i + 1}. <b>${htmlEsc(a.name)}</b>${a.note ? ` — <i>${htmlEsc(a.note)}</i>` : ""}`);
+    if (a.link) lines.push(`   🔗 ${htmlEsc(a.link)}`);
+  });
+  return sendMessage(env, chatId, lines.join("\n"), { parse_mode: "HTML" });
+}
+async function addAirdrop(env, chatId, arg) {
+  const parts = (arg || "").split("|").map((s) => s.trim());
+  const name = parts[0];
+  if (!name) return sendMessage(env, chatId, "Format: /addairdrop Nama | https://link | catatan\n(link & catatan opsional)");
+  await env.GRUPACU.put(`air:${Date.now()}`, JSON.stringify({ name, link: parts[1] || "", note: parts[2] || "", ts: Date.now() }));
+  return sendMessage(env, chatId, `✅ Airdrop ditambah: <b>${htmlEsc(name)}</b>\nLihat semua: /airdrops`, { parse_mode: "HTML" });
+}
+async function delAirdrop(env, chatId, arg) {
+  const arr = await loadAirdrops(env);
+  if (arg.toLowerCase() === "all") { for (const a of arr) await env.GRUPACU.delete(a.key); return sendMessage(env, chatId, "🗑️ Semua airdrop dihapus."); }
+  const n = parseInt(arg, 10);
+  if (!n || n < 1 || n > arr.length) return sendMessage(env, chatId, "Nomor tak valid. Lihat /airdrops.");
+  await env.GRUPACU.delete(arr[n - 1].key);
+  return sendMessage(env, chatId, `🗑️ Dihapus: ${htmlEsc(arr[n - 1].name)}`, { parse_mode: "HTML" });
+}
+
 // --- Alert harga ---
 async function addAlert(env, chatId, from, arg) {
   const m = (arg || "").match(/^([a-zA-Z]{2,12})\s*([<>]|naik|turun|di ?atas|di ?bawah)\s*\$?([\d.,]+)$/i);
@@ -1225,10 +1310,12 @@ function helpText() {
     "/me — statistik kamu",
     "/ref — link referral kamu",
     "",
-    "💹 Harga kripto:",
+    "💹 Harga & market:",
     "/p btc eth sol — harga (USD & IDR, 24 jam)",
     "ketik \"1 usdt\" / \"0.5 btc\" — langsung muncul nilainya",
     "/alert btc > 70000 — beri tahu saat harga kena · /alerts /delalert",
+    "/gas — biaya gas Ethereum sekarang",
+    "/airdrops — daftar airdrop aktif",
     "",
     "💼 Simpan wallet: DM bot ini → /wallet <alamat>",
   ].join("\n");
