@@ -584,19 +584,25 @@ async function runDigest(env) {
 
   const roster = await rosterMap(env);
   const totalMember = Object.keys(roster).length;
+  const accts = await getAccts(env);
   const lines = ["☀️ <b>DIGEST AIRDROP HARI INI</b>", ""];
   let n = 1;
   for (const { it, dl } of rows) {
+    const aid = aidOf(it);
+    const st = statusMeta(await getStatus(env, aid));
+    let prog = "";
+    if (accts.length) { const p = await getProg(env, aid); prog = ` · 👛${accts.filter((a) => p[a]).length}/${accts.length} akun`; }
     if (it.type === "task") {
       const t = it.t;
       const done = await countDone(env, t.id);
       const belum = Math.max(0, totalMember - done);
       const link = postLink(t.chatId || cfg.groupId, t.id);
-      lines.push(`${n}. <b>${htmlEsc(t.title)}</b> — ${dl ? countdown(dl) : "tanpa deadline"}`);
-      lines.push(`   ✅${done} garap${totalMember ? ` · ⬜${belum} belum` : ""}${link ? ` · 🔗 ${link}` : ""}`);
+      const memb = !accts.length && totalMember ? ` · ✅${done} garap · ⬜${belum} belum` : "";
+      lines.push(`${n}. ${st.emoji} <b>${htmlEsc(t.title)}</b> — ${dl ? countdown(dl) : "tanpa deadline"}`);
+      lines.push(`   ${st.label}${prog}${memb}${link ? ` · 🔗 ${link}` : ""}`);
     } else {
       const a = it.a;
-      lines.push(`${n}. <b>${htmlEsc(a.name)}</b>${a.link ? ` · 🔗 ${htmlEsc(a.link)}` : ""}`);
+      lines.push(`${n}. ${st.emoji} <b>${htmlEsc(a.name)}</b>${prog}${a.link ? ` · 🔗 ${htmlEsc(a.link)}` : ""}`);
     }
     n++;
   }
@@ -897,6 +903,21 @@ async function onCallback(env, cq) {
       if (prog[label]) delete prog[label]; else prog[label] = Date.now();
       await saveProg(env, aid, prog);
     }
+    return sendBoardAirdrop(env, chatId, aid, cq);
+  }
+  if (data.startsWith("ba:")) {
+    const i2 = data.lastIndexOf(":");
+    const aid = data.slice(3, i2), mode = data.slice(i2 + 1);
+    const accts = await getAccts(env);
+    const prog = {};
+    if (mode === "all") { const now = Date.now(); accts.forEach((a) => { prog[a] = now; }); }
+    await saveProg(env, aid, prog); // "none" -> objek kosong
+    return sendBoardAirdrop(env, chatId, aid, cq);
+  }
+  if (data.startsWith("bs:")) {
+    const i2 = data.lastIndexOf(":");
+    const aid = data.slice(3, i2), key = data.slice(i2 + 1);
+    await saveStatus(env, aid, key);
     return sendBoardAirdrop(env, chatId, aid, cq);
   }
 }
@@ -1406,20 +1427,26 @@ async function sendCalendar(env, chatId) {
   let n = 1;
   const [roster] = await Promise.all([rosterMap(env)]);
   const totalMember = Object.keys(roster).length;
+  const accts = await getAccts(env);
   for (const { it, dl } of rows) {
+    const aid = aidOf(it);
+    const st = statusMeta(await getStatus(env, aid));
+    // Progres per akun (kalau kamu pakai /board), fallback ke done member.
+    let prog = "";
+    if (accts.length) { const p = await getProg(env, aid); prog = ` · 👛${accts.filter((a) => p[a]).length}/${accts.length} akun`; }
     if (it.type === "task") {
       const t = it.t;
       const done = await countDone(env, t.id);
-      const belum = Math.max(0, totalMember - done);
       const link = postLink(t.chatId || cfg.groupId, t.id);
       const cd = dl ? (t.closed ? "⛔ lewat" : countdown(dl)) : "—";
       const when = dl ? ` · ${fmtWaktu(dl)}` : "";
-      lines.push(`${n}. <b>${htmlEsc(t.title)}</b>`);
-      lines.push(`   ${cd}${when} · ✅${done} garap${totalMember ? ` · ⬜${belum} belum` : ""}`);
+      const memb = !accts.length && totalMember ? ` · ✅${done}/${totalMember}` : "";
+      lines.push(`${n}. ${st.emoji} <b>${htmlEsc(t.title)}</b>`);
+      lines.push(`   ${cd}${when}${prog}${memb}`);
       if (link) lines.push(`   🔗 ${link}`);
     } else {
       const a = it.a;
-      lines.push(`${n}. <b>${htmlEsc(a.name)}</b>${a.note ? ` — <i>${htmlEsc(a.note)}</i>` : ""}`);
+      lines.push(`${n}. ${st.emoji} <b>${htmlEsc(a.name)}</b>${a.note ? ` — <i>${htmlEsc(a.note)}</i>` : ""}${prog}`);
       if (a.link) lines.push(`   🔗 ${htmlEsc(a.link)}`);
     }
     n++;
@@ -1472,6 +1499,17 @@ async function delAirdrop(env, chatId, arg) {
 // Model: `accts` -> ["Akun 1", ...] ; `ap:<aid>` -> { "<label akun>": ts } (yang sudah garap).
 // aid = "t<taskId>" (post channel ditandai) atau "m<ts>" (airdrop manual) — tanpa ':' biar aman di callback.
 
+// Status lifecycle tiap airdrop (buat ngelola banyak airdrop).
+const STATUSES = [
+  { key: "ongoing", emoji: "🟢", label: "Ongoing" },
+  { key: "snapshot", emoji: "📸", label: "Snapshot" },
+  { key: "tge", emoji: "🚀", label: "TGE/Claim" },
+  { key: "done", emoji: "💰", label: "Distributed" },
+];
+function statusMeta(key) { return STATUSES.find((s) => s.key === key) || STATUSES[0]; }
+async function getStatus(env, aid) { return (await env.GRUPACU.get(`stt:${aid}`)) || "ongoing"; }
+async function saveStatus(env, aid, key) { await env.GRUPACU.put(`stt:${aid}`, key); }
+
 async function getAccts(env) {
   const raw = await env.GRUPACU.get("accts");
   try { const a = raw ? JSON.parse(raw) : []; return Array.isArray(a) ? a : []; } catch { return []; }
@@ -1523,11 +1561,11 @@ async function sendBoard(env, chatId) {
     const aid = aidOf(it);
     const prog = await getProg(env, aid);
     const done = accts.filter((a) => prog[a]).length;
-    const mark = done === accts.length ? "✅" : done ? "🔸" : "▫️";
-    rows.push([{ text: `${mark} ${aidLabel(it)} (${done}/${accts.length})`, callback_data: `bd:${aid}` }]);
+    const st = statusMeta(await getStatus(env, aid));
+    rows.push([{ text: `${st.emoji} ${aidLabel(it)} (${done}/${accts.length})`, callback_data: `bd:${aid}` }]);
   }
   rows.push([{ text: "👛 Kelola akun", callback_data: "acctlist" }]);
-  return sendMessage(env, chatId, `📊 <b>PAPAN PROGRES AIRDROP</b>\n${accts.length} akun · tap airdrop buat centang per akun:`, { parse_mode: "HTML", reply_markup: { inline_keyboard: rows } });
+  return sendMessage(env, chatId, `📊 <b>PAPAN PROGRES AIRDROP</b>\n${accts.length} akun · tap airdrop buat atur:\n🟢 ongoing · 📸 snapshot · 🚀 TGE · 💰 distributed`, { parse_mode: "HTML", reply_markup: { inline_keyboard: rows } });
 }
 
 // Detail 1 airdrop: tombol toggle per akun (edit di tempat kalau dari callback).
@@ -1537,10 +1575,19 @@ async function sendBoardAirdrop(env, chatId, aid, cq) {
   const it = items.find((x) => aidOf(x) === aid);
   const label = it ? aidLabel(it) : aid;
   const prog = await getProg(env, aid);
+  const curStatus = await getStatus(env, aid);
   const rows = accts.map((a, i) => [{ text: `${prog[a] ? "✅" : "⬜"} ${a}`, callback_data: `bt:${aid}:${i}` }]);
+  // Aksi cepat: centang / reset semua akun.
+  rows.push([
+    { text: "✅ Semua akun", callback_data: `ba:${aid}:all` },
+    { text: "⬜ Reset", callback_data: `ba:${aid}:none` },
+  ]);
+  // Baris status lifecycle.
+  rows.push(STATUSES.map((s) => ({ text: `${s.key === curStatus ? "•" : ""}${s.emoji} ${s.label}`, callback_data: `bs:${aid}:${s.key}` })));
   rows.push([{ text: "🔙 Semua airdrop", callback_data: "board" }]);
   const done = accts.filter((a) => prog[a]).length;
-  const body = `📊 <b>${htmlEsc(label)}</b>\n${done}/${accts.length} akun sudah garap.\nTap buat ganti status:`;
+  const sm = statusMeta(curStatus);
+  const body = `📊 <b>${htmlEsc(label)}</b>  ${sm.emoji} ${sm.label}\n${done}/${accts.length} akun sudah garap.\nTap akun buat toggle · atur status di bawah:`;
   const markup = { inline_keyboard: rows };
   if (cq && cq.message) {
     return tg(env, "editMessageText", { chat_id: chatId, message_id: cq.message.message_id, text: body, parse_mode: "HTML", reply_markup: markup });
