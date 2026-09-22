@@ -47,13 +47,18 @@ menandai "done" di grup diskusi, dan bot mencatat per orang.
 
 ## Perintah
 
-**Grup:** `/daftar` `/leaderboard` `/task` `/tasks` `/me` `/ref` ·
-**Admin:** `/bind` `/setup` `/markers` `/announce on|off` `/deadline 12h`
-`/nudge` `/members` `/wallets` `/refboard` `/reset yakin`
+**Grup:** `/daftar` `/leaderboard` `/task` `/tasks` `/me` `/ref` `/airdrops`
+`/calendar` ·
+**Admin:** `/bind` `/setup` `/markers` `/announce on|off` `/digest on|off`
+`/addairdrop` `/deadline 12h` `/nudge` `/members` `/wallets` `/refboard`
+`/reset yakin`
 
-`/deadline` & `/nudge` dipakai dengan **reply ke post**-nya. Untuk reminder
-otomatis menjelang/saat deadline, pasang **Cron Trigger** `0 * * * *` di
-Settings → Triggers.
+`/calendar` — airdrop diurut dari **deadline terdekat** + countdown + progress
+garap. `/deadline` & `/nudge` dipakai dengan **reply ke post**-nya.
+
+Pasang **Cron Trigger** `0 * * * *` (Settings → Triggers) untuk:
+reminder **H-1 & menjelang/saat deadline** (colek yang belum garap) dan
+**digest airdrop harian** (auto-post ke grup ~08:00 WIB; matikan dgn `/digest off`).
 
 **DM:** `/wallet <alamat>` `/mywallet` `/me` `/leaderboard`
 

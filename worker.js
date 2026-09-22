@@ -25,7 +25,7 @@ const DEFAULT_REACT_EMOJI = ["👍", "✅", "✔️", "🔥"];
 
 export default {
   async scheduled(event, env, ctx) {
-    ctx.waitUntil((async () => { await runDeadlines(env); await runAlerts(env); })());
+    ctx.waitUntil((async () => { await runDeadlines(env); await runDigest(env); await runAlerts(env); })());
   },
   async fetch(request, env) {
     if (request.method !== "POST") {
@@ -263,6 +263,7 @@ async function onGroupCommand(env, chat, from, text, msg) {
   if (cmd === "/fgi" || cmd === "/feargreed") return sendFgi(env, chatId, th);
   if (cmd === "/conv" || cmd === "/convert") return doConvCmd(env, chatId, arg, th);
   if (cmd === "/airdrops" || cmd === "/airdrop") return listAirdrops(env, chatId);
+  if (cmd === "/calendar" || cmd === "/kalender" || cmd === "/cal") return sendCalendar(env, chatId);
   if (cmd === "/alert") return addAlert(env, chatId, from, arg);
   if (cmd === "/alerts") return listAlerts(env, chatId, from);
   if (cmd === "/delalert" || cmd === "/hapusalert") return delAlert(env, chatId, from, arg);
@@ -284,6 +285,12 @@ async function onGroupCommand(env, chat, from, text, msg) {
     cfg.announce = !(arg.toLowerCase() === "off" || arg === "0");
     await saveConfig(env, cfg);
     return sendMessage(env, chatId, `📢 Pengumuman otomatis tiap post baru: ${cfg.announce ? "ON ✅" : "OFF"}`);
+  }
+  if (cmd === "/digest") {
+    const cfg = await getConfig(env);
+    cfg.digest = !(arg.toLowerCase() === "off" || arg === "0");
+    await saveConfig(env, cfg);
+    return sendMessage(env, chatId, `☀️ Digest airdrop harian (~${String(DIGEST_HOUR).padStart(2, "0")}:00 WIB): ${cfg.digest ? "ON ✅" : "OFF"}\n(butuh Cron Trigger 0 * * * * aktif)`);
   }
   if (cmd === "/reset") return handleReset(env, chatId, arg);
 }
@@ -332,6 +339,7 @@ async function onPrivate(env, chatId, from, text, msg) {
   if (cmd === "/fgi" || cmd === "/feargreed") return sendFgi(env, chatId);
   if (cmd === "/conv" || cmd === "/convert") return doConvCmd(env, chatId, arg);
   if (cmd === "/airdrops" || cmd === "/airdrop") return listAirdrops(env, chatId);
+  if (cmd === "/calendar" || cmd === "/kalender" || cmd === "/cal") return sendCalendar(env, chatId);
   if (cmd === "/alert") return addAlert(env, chatId, from, arg);
   if (cmd === "/alerts") return listAlerts(env, chatId, from);
   if (cmd === "/delalert" || cmd === "/hapusalert") return delAlert(env, chatId, from, arg);
@@ -511,9 +519,11 @@ async function nudge(env, chatId, taskId, opts) {
   }
   const head = opts.final
     ? `⛔ <b>Deadline lewat</b> — ${title}\n✅ ${sudah} garap · ⬜ ${belum.length} belum:`
-    : opts.auto
-      ? `⏰ <b>Menjelang deadline</b> — ${title}\n${belum.length} belum garap, ayo:`
-      : `📣 <b>${belum.length} belum garap</b> — ${title}\nColek:`;
+    : opts.d1
+      ? `🔔 <b>H-1 deadline</b> — ${title}\n${belum.length} belum garap, tinggal ~1 hari:`
+      : opts.auto
+        ? `⏰ <b>Menjelang deadline</b> — ${title}\n${belum.length} belum garap, ayo:`
+        : `📣 <b>${belum.length} belum garap</b> — ${title}\nColek:`;
   const capped = belum.slice(0, 60);
   const mentions = capped.map((uid) => `<a href="tg://user?id=${uid}">${htmlEsc(roster[uid])}</a>`);
   // Kirim per potongan (maks 25 mention per pesan). Potongan pertama pakai header + reply ke post.
@@ -543,10 +553,51 @@ async function runDeadlines(env) {
         await nudge(env, meta.chatId, String(meta.id), { auto: true });
         meta.remindedH3 = true;
         await env.GRUPACU.put(k.name, JSON.stringify(meta));
+      } else if (meta.deadline - now <= 24 * 3600000 && !meta.remindedD1) {
+        await nudge(env, meta.chatId, String(meta.id), { auto: true, d1: true });
+        meta.remindedD1 = true;
+        await env.GRUPACU.put(k.name, JSON.stringify(meta));
       }
     }
     cursor = res.list_complete ? null : res.cursor;
   } while (cursor);
+}
+
+// Cron: digest airdrop harian — auto-post ke grup tiap pagi (sekali/hari).
+const DIGEST_HOUR = 8; // 08:00 WIB
+async function runDigest(env) {
+  const cfg = await getConfig(env);
+  if (!cfg.digest || !cfg.groupId) return;
+  const d = new Date(Date.now() + WIB);
+  if (d.getUTCHours() !== DIGEST_HOUR) return; // hanya jam digest
+  const today = `${d.getUTCFullYear()}-${d.getUTCMonth() + 1}-${d.getUTCDate()}`;
+  if (cfg.lastDigest === today) return; // sudah dikirim hari ini
+
+  const rows = (await airdropsByDeadline(env)).filter((r) => !(r.it.type === "task" && r.it.t.closed));
+  cfg.lastDigest = today; // tandai lebih dulu biar tak dobel walau tak ada isi
+  await saveConfig(env, cfg);
+  if (!rows.length) return;
+
+  const roster = await rosterMap(env);
+  const totalMember = Object.keys(roster).length;
+  const lines = ["☀️ <b>DIGEST AIRDROP HARI INI</b>", ""];
+  let n = 1;
+  for (const { it, dl } of rows) {
+    if (it.type === "task") {
+      const t = it.t;
+      const done = await countDone(env, t.id);
+      const belum = Math.max(0, totalMember - done);
+      const link = postLink(t.chatId || cfg.groupId, t.id);
+      lines.push(`${n}. <b>${htmlEsc(t.title)}</b> — ${dl ? countdown(dl) : "tanpa deadline"}`);
+      lines.push(`   ✅${done} garap${totalMember ? ` · ⬜${belum} belum` : ""}${link ? ` · 🔗 ${link}` : ""}`);
+    } else {
+      const a = it.a;
+      lines.push(`${n}. <b>${htmlEsc(a.name)}</b>${a.link ? ` · 🔗 ${htmlEsc(a.link)}` : ""}`);
+    }
+    n++;
+  }
+  lines.push("", "Ayo garap yang deadline-nya dekat! Detail: /calendar");
+  await sendMessage(env, cfg.groupId, lines.join("\n"), { parse_mode: "HTML", disable_web_page_preview: true });
 }
 
 async function countDone(env, taskId) {
@@ -844,6 +895,8 @@ async function getConfig(env) {
     countReactions: c.countReactions !== false,
     announce: c.announce !== false,
     groupId: c.groupId || null,
+    digest: c.digest !== false, // digest airdrop harian (default ON)
+    lastDigest: c.lastDigest || null, // tanggal WIB terakhir digest dikirim (anti-dobel)
   };
 }
 async function saveConfig(env, cfg) {
@@ -1311,6 +1364,50 @@ async function listAirdrops(env, chatId) {
   lines.push("", "<i>Tap 🔗 buka post · garap lalu balas \"done\"</i>");
   return sendMessage(env, chatId, lines.join("\n"), { parse_mode: "HTML" });
 }
+// Item airdrop diurutkan: yang punya deadline (terdekat dulu) di atas, lalu tanpa deadline.
+async function airdropsByDeadline(env) {
+  const items = await airdropItems(env);
+  const withDl = [], noDl = [];
+  for (const it of items) {
+    const dl = it.type === "task" ? it.t.deadline : null;
+    (dl ? withDl : noDl).push({ it, dl });
+  }
+  withDl.sort((a, b) => a.dl - b.dl); // deadline terdekat dulu
+  return [...withDl, ...noDl];
+}
+
+// 🗓️ /calendar — airdrop diurut dari deadline terdekat + countdown + progress garap.
+async function sendCalendar(env, chatId) {
+  const cfg = await getConfig(env);
+  const rows = await airdropsByDeadline(env);
+  if (!rows.length) {
+    return sendMessage(env, chatId, "🗓️ Belum ada airdrop. Admin tandai lewat /addairdrop (deadline: /addairdrop 3d).");
+  }
+  const lines = ["🗓️ <b>KALENDER AIRDROP</b>", "<i>diurut dari deadline terdekat</i>", ""];
+  let n = 1;
+  const [roster] = await Promise.all([rosterMap(env)]);
+  const totalMember = Object.keys(roster).length;
+  for (const { it, dl } of rows) {
+    if (it.type === "task") {
+      const t = it.t;
+      const done = await countDone(env, t.id);
+      const belum = Math.max(0, totalMember - done);
+      const link = postLink(t.chatId || cfg.groupId, t.id);
+      const cd = dl ? (t.closed ? "⛔ lewat" : countdown(dl)) : "—";
+      const when = dl ? ` · ${fmtWaktu(dl)}` : "";
+      lines.push(`${n}. <b>${htmlEsc(t.title)}</b>`);
+      lines.push(`   ${cd}${when} · ✅${done} garap${totalMember ? ` · ⬜${belum} belum` : ""}`);
+      if (link) lines.push(`   🔗 ${link}`);
+    } else {
+      const a = it.a;
+      lines.push(`${n}. <b>${htmlEsc(a.name)}</b>${a.note ? ` — <i>${htmlEsc(a.note)}</i>` : ""}`);
+      if (a.link) lines.push(`   🔗 ${htmlEsc(a.link)}`);
+    }
+    n++;
+  }
+  return sendMessage(env, chatId, lines.join("\n"), { parse_mode: "HTML", disable_web_page_preview: true });
+}
+
 // /addairdrop — balas post channel utk menandai, ATAU teks "Nama | link | catatan" utk airdrop luar.
 async function addAirdrop(env, chatId, arg, msg) {
   const tid = taskIdOf(msg);
@@ -1489,6 +1586,7 @@ function helpText() {
     "ketik \"1 btc to eth\" — konversi antar coin (/conv 1 btc eth)",
     "/gas — biaya gas Ethereum · /fgi — Fear & Greed Index",
     "/airdrops — daftar airdrop aktif (+ countdown deadline)",
+    "/calendar — airdrop diurut dari deadline terdekat + progress garap",
     "",
     "💼 Simpan wallet: DM bot ini → /wallet <alamat>",
   ].join("\n");
