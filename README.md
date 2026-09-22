@@ -56,11 +56,17 @@ akun/wallet-mu, lalu `/board` — tiap airdrop bisa dicentang **per akun** (mis.
 🚀 TGE → 💰 distributed), **modal**, dan **catatan cara garap**. Yang sudah
 distributed otomatis disembunyikan (`/board all` untuk tampilkan).
 
-- `/stats` — ringkasan (jumlah per status, akun, total modal).
-- `/roi` — rekap modal semua airdrop.
-- `/modal <nama> | <$>` — catat modal gas · `/note <nama> | <cara>` — simpan cara garap.
+- `/stats` — ringkasan (per status, akun, total modal & target, perkiraan bersih).
+- `/roi` — rekap modal + target semua airdrop.
+- `/modal <nama> | <$>` · `/target <nama> | <$>` · `/note <nama> | <cara>`.
+- `/export` — dump semua airdrop (status, modal, target, catatan, ✅/⬜ per akun).
+- `/akun` → tap akun → lihat sisa garapan akun itu.
+- `/gasalert <gwei>` — auto-colek ke grup saat gas Ethereum ≤ ambang (butuh Cron).
+- `/remind <durasi> <pesan>` (mis. `2d`, `3h`, `30m`) → di-DM saat waktunya ·
+  `/reminders` · `/delremind <no>` (butuh Cron).
 
-Data di KV: `accts`, `ap:<aid>`, `stt:<aid>` (status), `cost:<aid>`, `nx:<aid>`.
+Data di KV: `accts`, `ap:<aid>`, `stt:<aid>` (status), `cost:<aid>`, `tgt:<aid>`,
+`nx:<aid>` (catatan), `rem:<due>:<uid>` (reminder). Gas-alert di `cfg`.
 
 **Admin:** `/bind` `/setup` `/markers` `/announce on|off` `/digest on|off`
 `/addairdrop` `/deadline 12h` `/nudge` `/members` `/wallets` `/refboard`

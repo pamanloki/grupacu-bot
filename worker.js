@@ -25,7 +25,7 @@ const DEFAULT_REACT_EMOJI = ["👍", "✅", "✔️", "🔥"];
 
 export default {
   async scheduled(event, env, ctx) {
-    ctx.waitUntil((async () => { await runDeadlines(env); await runDigest(env); await runAlerts(env); })());
+    ctx.waitUntil((async () => { await runDeadlines(env); await runDigest(env); await runAlerts(env); await runGasAlert(env); await runReminders(env); })());
   },
   async fetch(request, env) {
     if (request.method !== "POST") {
@@ -269,6 +269,12 @@ async function onGroupCommand(env, chat, from, text, msg) {
   if (cmd === "/roi" || cmd === "/modalku") return sendRoi(env, chatId);
   if (cmd === "/modal") return handleModal(env, chatId, arg);
   if (cmd === "/note" || cmd === "/catatan") return handleNote(env, chatId, arg);
+  if (cmd === "/target") return handleTarget(env, chatId, arg);
+  if (cmd === "/export") return sendExport(env, chatId);
+  if (cmd === "/gasalert" || cmd === "/gasalarm") return handleGasAlert(env, chatId, arg);
+  if (cmd === "/remind" || cmd === "/ingatkan") return handleRemind(env, chatId, from, arg);
+  if (cmd === "/reminders" || cmd === "/ingat") return listReminders(env, chatId, from);
+  if (cmd === "/delremind") return delReminder(env, chatId, from, arg);
   if (cmd === "/akun" || cmd === "/akunku" || cmd === "/accounts") return handleAccounts(env, chatId, arg);
   if (cmd === "/alert") return addAlert(env, chatId, from, arg);
   if (cmd === "/alerts") return listAlerts(env, chatId, from);
@@ -351,6 +357,12 @@ async function onPrivate(env, chatId, from, text, msg) {
   if (cmd === "/roi" || cmd === "/modalku") return sendRoi(env, chatId);
   if (cmd === "/modal") return handleModal(env, chatId, arg);
   if (cmd === "/note" || cmd === "/catatan") return handleNote(env, chatId, arg);
+  if (cmd === "/target") return handleTarget(env, chatId, arg);
+  if (cmd === "/export") return sendExport(env, chatId);
+  if (cmd === "/gasalert" || cmd === "/gasalarm") return handleGasAlert(env, chatId, arg);
+  if (cmd === "/remind" || cmd === "/ingatkan") return handleRemind(env, chatId, from, arg);
+  if (cmd === "/reminders" || cmd === "/ingat") return listReminders(env, chatId, from);
+  if (cmd === "/delremind") return delReminder(env, chatId, from, arg);
   if (cmd === "/akun" || cmd === "/akunku" || cmd === "/accounts") return handleAccounts(env, chatId, arg);
   if (cmd === "/alert") return addAlert(env, chatId, from, arg);
   if (cmd === "/alerts") return listAlerts(env, chatId, from);
@@ -904,6 +916,7 @@ async function onCallback(env, cq) {
   if (data === "board") return sendBoard(env, chatId);
   if (data === "board:all") return sendBoard(env, chatId, true);
   if (data === "acctlist") return handleAccounts(env, chatId, "");
+  if (data.startsWith("acc:")) return sendAccountView(env, chatId, Number(data.slice(4)));
   if (data.startsWith("bd:")) return sendBoardAirdrop(env, chatId, data.slice(3), cq);
   if (data.startsWith("bt:")) {
     const i1 = data.indexOf(":"), i2 = data.lastIndexOf(":");
@@ -949,6 +962,8 @@ async function getConfig(env) {
     groupId: c.groupId || null,
     digest: c.digest !== false, // digest airdrop harian (default ON)
     lastDigest: c.lastDigest || null, // tanggal WIB terakhir digest dikirim (anti-dobel)
+    gasAlert: c.gasAlert || null, // ambang gas (gwei) buat notif otomatis
+    gasArmed: c.gasArmed !== false, // siap fire (hysteresis biar tak spam)
   };
 }
 async function saveConfig(env, cfg) {
@@ -1569,17 +1584,20 @@ async function sendRoi(env, chatId) {
   const items = await airdropItems(env);
   if (!items.length) return sendMessage(env, chatId, "Belum ada airdrop. Tandai lewat /addairdrop.");
   const lines = ["💸 <b>MODAL / ROI</b>", ""];
-  let total = 0, n = 1;
+  let totalCost = 0, totalTgt = 0, n = 1;
   for (const it of items) {
     const aid = aidOf(it);
-    const cost = await getCost(env, aid);
+    const cost = await getCost(env, aid), tgt = await getTarget(env, aid);
     const st = statusMeta(await getStatus(env, aid));
-    total += cost;
-    lines.push(`${n}. ${st.emoji} ${htmlEsc(aidLabel(it))} — modal $${cost}`);
+    totalCost += cost; totalTgt += tgt;
+    lines.push(`${n}. ${st.emoji} ${htmlEsc(aidLabel(it))} — modal $${cost}${tgt ? ` · 🎯 $${tgt}` : ""}`);
     n++;
   }
-  lines.push("", `Total modal keluar: <b>$${total.toFixed(2)}</b>`);
-  lines.push("<i>Set: /modal &lt;nama&gt; | &lt;jumlah&gt;</i>");
+  const net = totalTgt - totalCost;
+  lines.push("", `💸 Total modal: <b>$${totalCost.toFixed(2)}</b>`);
+  lines.push(`🎯 Total target: <b>$${totalTgt.toFixed(2)}</b>`);
+  lines.push(`${net >= 0 ? "📈" : "📉"} Perkiraan bersih: <b>$${net.toFixed(2)}</b>`);
+  lines.push("", "<i>Set: /modal &lt;nama&gt; | &lt;$&gt; · /target &lt;nama&gt; | &lt;$&gt;</i>");
   return sendMessage(env, chatId, lines.join("\n"), { parse_mode: "HTML" });
 }
 
@@ -1588,12 +1606,13 @@ async function sendStats(env, chatId) {
   const items = await airdropItems(env);
   const accts = await getAccts(env);
   const by = { ongoing: 0, snapshot: 0, tge: 0, done: 0 };
-  let totalCost = 0, fullyDone = 0;
+  let totalCost = 0, totalTgt = 0, fullyDone = 0;
   for (const it of items) {
     const aid = aidOf(it);
     const stk = await getStatus(env, aid);
     by[stk] = (by[stk] || 0) + 1;
     totalCost += await getCost(env, aid);
+    totalTgt += await getTarget(env, aid);
     if (accts.length) { const p = await getProg(env, aid); if (accts.every((a) => p[a])) fullyDone++; }
   }
   const active = items.filter((it) => !(it.type === "task" && it.t.closed));
@@ -1606,9 +1625,155 @@ async function sendStats(env, chatId) {
     "Per status:",
     `🟢 Ongoing ${by.ongoing} · 📸 Snapshot ${by.snapshot} · 🚀 TGE ${by.tge} · 💰 Distributed ${by.done}`,
     "",
-    `💸 Total modal keluar: <b>$${totalCost.toFixed(2)}</b>`,
+    `💸 Total modal: <b>$${totalCost.toFixed(2)}</b> · 🎯 target: <b>$${totalTgt.toFixed(2)}</b>`,
+    `${totalTgt - totalCost >= 0 ? "📈" : "📉"} Perkiraan bersih: <b>$${(totalTgt - totalCost).toFixed(2)}</b>`,
+    "",
+    "<i>Detail: /roi · /export</i>",
   ].filter((x) => x !== "");
   return sendMessage(env, chatId, lines.join("\n"), { parse_mode: "HTML" });
+}
+
+// --- Target / expected value per airdrop ---
+async function getTarget(env, aid) { const v = await env.GRUPACU.get(`tgt:${aid}`); return v ? Number(v) || 0 : 0; }
+async function handleTarget(env, chatId, arg) {
+  const [q, amtRaw] = (arg || "").split("|").map((s) => s.trim());
+  if (!q || !amtRaw) return sendMessage(env, chatId, "Cara: <code>/target &lt;nama&gt; | &lt;perkiraan $&gt;</code>\nmis: <code>/target galxe | 500</code>", { parse_mode: "HTML" });
+  const it = await findAirdrop(env, q);
+  if (!it) return sendMessage(env, chatId, `Airdrop "${htmlEsc(q)}" tak ketemu.`, { parse_mode: "HTML" });
+  const amt = Number(String(amtRaw).replace(/[^\d.]/g, "")) || 0;
+  await env.GRUPACU.put(`tgt:${aidOf(it)}`, String(amt));
+  return sendMessage(env, chatId, `🎯 Target <b>${htmlEsc(aidLabel(it))}</b>: $${amt}\nRekap: /roi`, { parse_mode: "HTML" });
+}
+
+// --- Gas alert otomatis (cron) ---
+async function handleGasAlert(env, chatId, arg) {
+  const cfg = await getConfig(env);
+  const a = (arg || "").trim().toLowerCase();
+  if (a === "off" || a === "0") {
+    cfg.gasAlert = null; await saveConfig(env, cfg);
+    return sendMessage(env, chatId, "🔕 Gas alert dimatikan.");
+  }
+  const n = Number(a.replace(/[^\d.]/g, ""));
+  if (!n) {
+    const cur = cfg.gasAlert ? `${cfg.gasAlert} gwei` : "off";
+    return sendMessage(env, chatId, `⛽ Gas alert saat ini: <b>${cur}</b>\nSet: <code>/gasalert 8</code> (colek kalau gas ≤ 8 gwei) · <code>/gasalert off</code>\n(butuh Cron Trigger aktif)`, { parse_mode: "HTML" });
+  }
+  cfg.gasAlert = n; cfg.gasArmed = true; await saveConfig(env, cfg);
+  return sendMessage(env, chatId, `🔔 Gas alert ON: colek kalau gas Ethereum ≤ <b>${n} gwei</b>.`, { parse_mode: "HTML" });
+}
+async function runGasAlert(env) {
+  const cfg = await getConfig(env);
+  if (!cfg.gasAlert || !cfg.groupId) return;
+  const gwei = await ethGasGwei();
+  if (gwei == null) return;
+  if (gwei <= cfg.gasAlert && cfg.gasArmed) {
+    await sendMessage(env, cfg.groupId, `⛽🔔 <b>Gas murah!</b> Sekarang ~${gwei.toFixed(2)} gwei (target ≤ ${cfg.gasAlert}).\nPas buat claim/garap. /gas`, { parse_mode: "HTML" });
+    cfg.gasArmed = false; await saveConfig(env, cfg);
+  } else if (gwei > cfg.gasAlert && !cfg.gasArmed) {
+    cfg.gasArmed = true; await saveConfig(env, cfg); // re-arm setelah naik lagi
+  }
+}
+
+// --- Reminder pribadi (cron) ---
+async function handleRemind(env, chatId, from, arg) {
+  const m = (arg || "").trim().match(/^(\d+\s*[a-zA-Z]*)\s+(.+)$/);
+  if (!m) return sendMessage(env, chatId, "Cara: <code>/remind &lt;durasi&gt; &lt;pesan&gt;</code>\nmis: <code>/remind 2d garap galxe</code> · <code>/remind 3h claim</code>", { parse_mode: "HTML" });
+  const ms = parseDur(m[1]);
+  if (!ms) return sendMessage(env, chatId, "Durasi tak valid. Contoh: 30m, 3h, 2d");
+  const due = Date.now() + ms;
+  await env.GRUPACU.put(`rem:${due}:${from.id}`, JSON.stringify({ uid: from.id, text: m[2].slice(0, 200), due }));
+  return sendMessage(env, chatId, `⏰ Oke, kuingetin <b>${fmtWaktu(due)}</b>:\n"${htmlEsc(m[2].slice(0, 200))}"\nLihat: /reminders`, { parse_mode: "HTML" });
+}
+async function listReminders(env, chatId, from) {
+  const arr = [];
+  let cursor;
+  do {
+    const res = await env.GRUPACU.list({ prefix: "rem:", cursor, limit: 1000 });
+    for (const k of res.keys) { const raw = await env.GRUPACU.get(k.name); if (raw) { try { const r = JSON.parse(raw); if (r.uid == from.id) arr.push({ key: k.name, ...r }); } catch { /* skip */ } } }
+    cursor = res.list_complete ? null : res.cursor;
+  } while (cursor);
+  arr.sort((a, b) => a.due - b.due);
+  if (!arr.length) return sendMessage(env, chatId, "Belum ada reminder. Set: /remind 2d garap X");
+  const lines = ["⏰ <b>REMINDER KAMU</b>", ""];
+  arr.forEach((r, i) => lines.push(`${i + 1}. ${fmtWaktu(r.due)} — ${htmlEsc(r.text)}`));
+  lines.push("", "Hapus: /delremind <no>");
+  return sendMessage(env, chatId, lines.join("\n"), { parse_mode: "HTML" });
+}
+async function delReminder(env, chatId, from, arg) {
+  const arr = [];
+  let cursor;
+  do {
+    const res = await env.GRUPACU.list({ prefix: "rem:", cursor, limit: 1000 });
+    for (const k of res.keys) { const raw = await env.GRUPACU.get(k.name); if (raw) { try { const r = JSON.parse(raw); if (r.uid == from.id) arr.push({ key: k.name, ...r }); } catch { /* skip */ } } }
+    cursor = res.list_complete ? null : res.cursor;
+  } while (cursor);
+  arr.sort((a, b) => a.due - b.due);
+  const n = parseInt(arg, 10);
+  if (!n || n < 1 || n > arr.length) return sendMessage(env, chatId, "Nomor tak valid. Lihat /reminders.");
+  await env.GRUPACU.delete(arr[n - 1].key);
+  return sendMessage(env, chatId, "🗑️ Reminder dihapus.");
+}
+async function runReminders(env) {
+  const now = Date.now();
+  let cursor;
+  do {
+    const res = await env.GRUPACU.list({ prefix: "rem:", cursor, limit: 1000 });
+    for (const k of res.keys) {
+      let r; try { r = JSON.parse(await env.GRUPACU.get(k.name)); } catch { continue; }
+      if (!r || r.due > now) continue;
+      try { await sendMessage(env, r.uid, `⏰ <b>Reminder</b>\n${htmlEsc(r.text)}`, { parse_mode: "HTML" }); } catch { /* best effort */ }
+      await env.GRUPACU.delete(k.name);
+    }
+    cursor = res.list_complete ? null : res.cursor;
+  } while (cursor);
+}
+
+// --- Export ringkas semua data airdrop ---
+async function sendExport(env, chatId) {
+  const items = await airdropItems(env);
+  if (!items.length) return sendMessage(env, chatId, "Belum ada airdrop.");
+  const accts = await getAccts(env);
+  const lines = ["🗂️ <b>EXPORT AIRDROP</b>", ""];
+  let n = 1;
+  for (const it of items) {
+    const aid = aidOf(it);
+    const st = statusMeta(await getStatus(env, aid));
+    const cost = await getCost(env, aid), tgt = await getTarget(env, aid);
+    const note = await getNote(env, aid);
+    const prog = await getProg(env, aid);
+    lines.push(`${n}. ${st.emoji} <b>${htmlEsc(aidLabel(it))}</b> [${st.label}]`);
+    if (cost || tgt) lines.push(`   💸 modal $${cost} · 🎯 target $${tgt}`);
+    if (note) lines.push(`   📝 ${htmlEsc(note)}`);
+    if (accts.length) lines.push("   " + accts.map((a) => `${prog[a] ? "✅" : "⬜"}${a}`).join(" "));
+    n++;
+  }
+  const text = lines.join("\n");
+  // Kirim per potongan kalau kepanjangan.
+  for (let i = 0; i < text.length; i += 3800) {
+    await sendMessage(env, chatId, text.slice(i, i + 3800), { parse_mode: "HTML" });
+  }
+}
+
+// --- Lihat progres SATU akun (airdrop apa yang belum digarap akun itu) ---
+async function sendAccountView(env, chatId, idx) {
+  const accts = await getAccts(env);
+  const label = accts[idx];
+  if (!label) return sendMessage(env, chatId, "Akun tak ada. Lihat /akun.");
+  const items = (await airdropItems(env)).filter((it) => !(it.type === "task" && it.t.closed));
+  const belum = [], sudah = [];
+  for (const it of items) {
+    const st = await getStatus(env, aidOf(it));
+    if (st === "done") continue;
+    const prog = await getProg(env, aidOf(it));
+    (prog[label] ? sudah : belum).push(aidLabel(it));
+  }
+  const lines = [`👤 <b>${htmlEsc(label)}</b>`, ""];
+  lines.push(`⬜ Belum garap — ${belum.length}`);
+  belum.forEach((x, i) => lines.push(`${i + 1}. ${htmlEsc(x)}`));
+  lines.push("", `✅ Sudah — ${sudah.length}`);
+  if (sudah.length) sudah.forEach((x, i) => lines.push(`${i + 1}. ${htmlEsc(x)}`));
+  const rows = [[{ text: "🔙 Semua akun", callback_data: "acctlist" }]];
+  return sendMessage(env, chatId, lines.join("\n"), { parse_mode: "HTML", reply_markup: { inline_keyboard: rows } });
 }
 
 async function getAccts(env) {
@@ -1645,10 +1810,11 @@ async function handleAccounts(env, chatId, arg) {
   if (!accts.length) {
     return sendMessage(env, chatId, "👛 Belum ada akun.\nTambah dulu: <code>/akun add Akun1</code>\nLalu pantau progres tiap airdrop di /board.", { parse_mode: "HTML" });
   }
-  const lines = ["👛 <b>AKUN / WALLET KAMU</b>", ""];
-  accts.forEach((a, i) => lines.push(`${i + 1}. ${htmlEsc(a)}`));
-  lines.push("", "➕ <code>/akun add &lt;nama&gt;</code> · 🗑️ <code>/akun del &lt;no&gt;</code> · 📊 /board");
-  return sendMessage(env, chatId, lines.join("\n"), { parse_mode: "HTML" });
+  const lines = ["👛 <b>AKUN / WALLET KAMU</b>", "", "Tap akun buat lihat sisa garapannya:"];
+  const rows = accts.map((a, i) => [{ text: `👤 ${a}`, callback_data: `acc:${i}` }]);
+  rows.push([{ text: "📊 Papan airdrop", callback_data: "board" }]);
+  lines.push("", "➕ <code>/akun add &lt;nama&gt;</code> · 🗑️ <code>/akun del &lt;no&gt;</code>");
+  return sendMessage(env, chatId, lines.join("\n"), { parse_mode: "HTML", reply_markup: { inline_keyboard: rows } });
 }
 
 // /board — daftar airdrop aktif + berapa akun yang sudah garap; tap buat centang.
@@ -1849,8 +2015,10 @@ function helpText() {
     "/calendar — airdrop diurut dari deadline terdekat + progress garap",
     "/board — papan progres airdrop × akun (+ status & modal)",
     "/akun — kelola daftar akun/wallet kamu (add/del)",
-    "/stats — ringkasan semua airdrop · /roi — rekap modal",
-    "/modal <nama> | <$> — catat modal · /note <nama> | <cara>",
+    "/stats — ringkasan · /roi — modal & target · /export — dump",
+    "/modal <nama> | <$> · /target <nama> | <$> · /note <nama> | <cara>",
+    "/gasalert <gwei> — colek kalau gas murah",
+    "/remind <durasi> <pesan> · /reminders · /delremind <no>",
     "",
     "💼 Simpan wallet: DM bot ini → /wallet <alamat>",
   ].join("\n");
