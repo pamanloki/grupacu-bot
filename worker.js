@@ -260,7 +260,7 @@ async function onGroupCommand(env, chat, from, text, msg) {
   // Admin only
   if (!isAdmin(env, from.id)) return;
   if (cmd === "/bind") return bindGroup(env, chat);
-  if (cmd === "/addairdrop") return addAirdrop(env, chatId, arg);
+  if (cmd === "/addairdrop") return addAirdrop(env, chatId, arg, msg);
   if (cmd === "/delairdrop") return delAirdrop(env, chatId, arg);
   if (cmd === "/setup") return sendMessage(env, chatId, setupText(env));
   if (cmd === "/markers") return handleMarkers(env, chatId, arg);
@@ -336,7 +336,7 @@ async function onPrivate(env, chatId, from, text, msg) {
     if (cmd === "/refboard") return sendRefBoard(env, chatId);
     if (cmd === "/setup") return sendMessage(env, chatId, setupText(env));
     if (cmd === "/pdebug") return sendPriceDebug(env, chatId, arg || "btc");
-    if (cmd === "/addairdrop") return addAirdrop(env, chatId, arg);
+    if (cmd === "/addairdrop") return addAirdrop(env, chatId, arg, msg);
     if (cmd === "/delairdrop") return delAirdrop(env, chatId, arg);
   }
 
@@ -1152,56 +1152,78 @@ async function loadAirdrops(env) {
   arr.sort((a, b) => b.ts - a.ts); // terbaru dulu
   return arr;
 }
-async function listAirdrops(env, chatId) {
-  const cfg = await getConfig(env);
-  // Post channel (otomatis jadi airdrop) — terbaru dulu.
+// Gabungan item airdrop: post channel yang DITANDAI (task.airdrop) + manual.
+async function airdropItems(env) {
   const tasks = [];
   let cursor;
   do {
     const res = await env.GRUPACU.list({ prefix: "task:", cursor, limit: 1000 });
-    for (const k of res.keys) { const raw = await env.GRUPACU.get(k.name); if (raw) { try { tasks.push(JSON.parse(raw)); } catch { /* skip */ } } }
+    for (const k of res.keys) { const raw = await env.GRUPACU.get(k.name); if (raw) { try { const t = JSON.parse(raw); if (t.airdrop) tasks.push(t); } catch { /* skip */ } } }
     cursor = res.list_complete ? null : res.cursor;
   } while (cursor);
-  tasks.sort((a, b) => b.ts - a.ts);
+  tasks.sort((a, b) => (b.airdropTs || b.ts) - (a.airdropTs || a.ts));
   const manual = await loadAirdrops(env);
-
-  if (!tasks.length && !manual.length) {
-    return sendMessage(env, chatId, "🗓️ Belum ada airdrop.\nPost di channel (otomatis masuk), atau admin: /addairdrop Nama | link | catatan");
+  return [...tasks.map((t) => ({ type: "task", t })), ...manual.map((a) => ({ type: "manual", a }))];
+}
+async function listAirdrops(env, chatId) {
+  const cfg = await getConfig(env);
+  const items = await airdropItems(env);
+  if (!items.length) {
+    return sendMessage(env, chatId, "🗓️ Belum ada airdrop aktif.\nAdmin: balas post di channel dengan /addairdrop untuk menandainya,\natau /addairdrop Nama | link | catatan (airdrop luar).");
   }
   const lines = ["🗓️ <b>AIRDROP AKTIF</b>", ""];
   let n = 1;
-  for (const t of tasks.slice(0, 20)) {
-    const done = await countDone(env, t.id);
-    const link = postLink(t.chatId || cfg.groupId, t.id);
-    lines.push(`${n}. <b>${htmlEsc(t.title)}</b>  <i>(✅${done})</i>`);
-    if (link) lines.push(`   🔗 ${link}`);
-    n++;
-  }
-  if (manual.length) {
-    lines.push("", "➕ <i>Tambahan (di luar channel):</i>");
-    for (const a of manual) {
+  for (const it of items) {
+    if (it.type === "task") {
+      const t = it.t;
+      const done = await countDone(env, t.id);
+      const link = postLink(t.chatId || cfg.groupId, t.id);
+      lines.push(`${n}. <b>${htmlEsc(t.title)}</b>  <i>(✅${done})</i>`);
+      if (link) lines.push(`   🔗 ${link}`);
+    } else {
+      const a = it.a;
       lines.push(`${n}. <b>${htmlEsc(a.name)}</b>${a.note ? ` — <i>${htmlEsc(a.note)}</i>` : ""}`);
       if (a.link) lines.push(`   🔗 ${htmlEsc(a.link)}`);
-      n++;
     }
+    n++;
   }
   lines.push("", "<i>Tap 🔗 buka post · garap lalu balas \"done\"</i>");
   return sendMessage(env, chatId, lines.join("\n"), { parse_mode: "HTML" });
 }
-async function addAirdrop(env, chatId, arg) {
+// /addairdrop — balas post channel utk menandai, ATAU teks "Nama | link | catatan" utk airdrop luar.
+async function addAirdrop(env, chatId, arg, msg) {
+  const tid = taskIdOf(msg);
+  if (tid) {
+    const raw = await env.GRUPACU.get(`task:${tid}`);
+    const t = raw ? JSON.parse(raw) : { id: Number(tid), title: "Post #" + tid, ts: Date.now(), chatId };
+    t.airdrop = true;
+    t.airdropTs = Date.now();
+    if (arg) t.note = arg;
+    await env.GRUPACU.put(`task:${tid}`, JSON.stringify(t));
+    return sendMessage(env, chatId, `✅ Ditandai sebagai airdrop aktif: <b>${htmlEsc(t.title)}</b>\nLihat: /airdrops`, { parse_mode: "HTML" });
+  }
   const parts = (arg || "").split("|").map((s) => s.trim());
   const name = parts[0];
-  if (!name) return sendMessage(env, chatId, "Format: /addairdrop Nama | https://link | catatan\n(link & catatan opsional)");
+  if (!name) return sendMessage(env, chatId, "Cara pakai:\n• Balas post channel dengan /addairdrop → tandai post itu\n• /addairdrop Nama | link | catatan → airdrop di luar channel");
   await env.GRUPACU.put(`air:${Date.now()}`, JSON.stringify({ name, link: parts[1] || "", note: parts[2] || "", ts: Date.now() }));
-  return sendMessage(env, chatId, `✅ Airdrop ditambah: <b>${htmlEsc(name)}</b>\nLihat semua: /airdrops`, { parse_mode: "HTML" });
+  return sendMessage(env, chatId, `✅ Airdrop ditambah: <b>${htmlEsc(name)}</b>\nLihat: /airdrops`, { parse_mode: "HTML" });
 }
 async function delAirdrop(env, chatId, arg) {
-  const arr = await loadAirdrops(env);
-  if (arg.toLowerCase() === "all") { for (const a of arr) await env.GRUPACU.delete(a.key); return sendMessage(env, chatId, "🗑️ Semua airdrop dihapus."); }
+  const items = await airdropItems(env);
+  if (arg.toLowerCase() === "all") {
+    for (const it of items) {
+      if (it.type === "manual") await env.GRUPACU.delete(it.a.key);
+      else { it.t.airdrop = false; await env.GRUPACU.put(`task:${it.t.id}`, JSON.stringify(it.t)); }
+    }
+    return sendMessage(env, chatId, "🗑️ Semua tanda airdrop dihapus.");
+  }
   const n = parseInt(arg, 10);
-  if (!n || n < 1 || n > arr.length) return sendMessage(env, chatId, "Nomor tak valid. Lihat /airdrops.");
-  await env.GRUPACU.delete(arr[n - 1].key);
-  return sendMessage(env, chatId, `🗑️ Dihapus: ${htmlEsc(arr[n - 1].name)}`, { parse_mode: "HTML" });
+  if (!n || n < 1 || n > items.length) return sendMessage(env, chatId, "Nomor tak valid. Lihat /airdrops.");
+  const it = items[n - 1];
+  if (it.type === "manual") { await env.GRUPACU.delete(it.a.key); return sendMessage(env, chatId, `🗑️ Dihapus: ${htmlEsc(it.a.name)}`, { parse_mode: "HTML" }); }
+  it.t.airdrop = false;
+  await env.GRUPACU.put(`task:${it.t.id}`, JSON.stringify(it.t));
+  return sendMessage(env, chatId, `🗑️ Tanda airdrop dilepas: ${htmlEsc(it.t.title)}`, { parse_mode: "HTML" });
 }
 
 // --- Alert harga ---
